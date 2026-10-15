@@ -120,6 +120,53 @@ class DetectDriftTest(unittest.TestCase):
         self.assertEqual(stats["unresolved"], 1)
         self.assertEqual(stats["resolved"], 1)
 
+    def test_rule_suppresses_label_but_keeps_route(self):
+        changes = {
+            "labels": [{"old": "Save", "new": "Save changes"}],
+            "routes": [{"old": "/settings", "new": "/account/settings"}],
+        }
+        findings = analyze.detect_drift(
+            changes, pages=self._pages(), rules=[{"kind": "label", "value": "Save"}]
+        )
+        self.assertEqual([f["kind"] for f in findings], ["route"])
+
+    def test_page_glob_rule_only_suppresses_matching_pages(self):
+        changes = {"labels": [{"old": "Projects", "new": "Workspaces"}], "routes": []}
+        pages = [
+            {"path": "help/a.md", "content": "Projects here."},
+            {"path": "help/b.md", "content": "Projects there."},
+        ]
+        findings = analyze.detect_drift(
+            changes, pages=pages, rules=[{"kind": "label", "page": "help/b.*"}]
+        )
+        self.assertEqual([f["page"] for f in findings], ["help/a.md"])
+
+    def test_rules_are_backwards_compatible(self):
+        changes = {"labels": [{"old": "Save", "new": "Save changes"}], "routes": []}
+        without = analyze.detect_drift(changes, pages=self._pages())
+        with_empty = analyze.detect_drift(changes, pages=self._pages(), rules=[])
+        self.assertEqual(without, with_empty)
+
+    def test_malformed_rules_do_not_raise(self):
+        changes = {"labels": [{"old": "Save", "new": "Save changes"}], "routes": []}
+        for bad in (None, 123, "not-a-list", True, [123], [None], ["  "], [["x"]], [{"unknown": 1}]):
+            findings = analyze.detect_drift(changes, pages=self._pages(), rules=bad)
+            self.assertEqual(len(findings), 1)
+
+    def test_detect_drift_reports_suppressed_via_stats(self):
+        changes = {"labels": [{"old": "Save", "new": "Save changes"}], "routes": []}
+        report = {}
+        findings = analyze.detect_drift(
+            changes, pages=self._pages(), rules=[{"kind": "label", "value": "Save"}], stats=report
+        )
+        self.assertEqual(findings, [])
+        self.assertEqual(report["suppressed"], 1)
+
+    def test_summarise_reports_suppressed(self):
+        self.assertEqual(analyze.summarise([])["suppressed"], 0)
+        self.assertEqual(analyze.summarise([], suppressed=3)["suppressed"], 3)
+        self.assertEqual(analyze.summarise([], suppressed="bad")["suppressed"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

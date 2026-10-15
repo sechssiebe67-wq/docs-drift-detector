@@ -62,6 +62,7 @@ class Store:
         source: str,
         findings: List[Dict[str, Any]],
         pages: Optional[List[Any]] = None,
+        suppressed: int = 0,
     ) -> Dict[str, Any]:
         with self._lock:
             scan_id = uuid.uuid4().hex[:12]
@@ -71,7 +72,7 @@ class Store:
                 "source": (source or "release").strip()[:200] or "release",
                 "created_at": _utc_now(),
                 "findings": findings,
-                "stats": analyze.summarise(findings, pages),
+                "stats": analyze.summarise(findings, pages, suppressed),
             }
             self._scans[scan_id] = scan
             self._persist()
@@ -109,7 +110,8 @@ class Store:
                     break
             if updated is None:
                 return None
-            scan["stats"] = analyze.summarise(scan.get("findings", []))
+            suppressed = scan.get("stats", {}).get("suppressed", 0)
+            scan["stats"] = analyze.summarise(scan.get("findings", []), suppressed=suppressed)
             self._persist()
             return copy.deepcopy(scan)
 

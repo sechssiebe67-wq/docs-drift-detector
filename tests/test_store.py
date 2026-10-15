@@ -42,6 +42,18 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(self.store.get_scan(scan["id"])["name"], "R1")
         self.assertEqual(len(self.store.list_scans()), 1)
 
+    def test_create_scan_stats_include_suppressed(self):
+        scan = self.store.create_scan("R1", "release", [_finding()])
+        self.assertEqual(scan["stats"]["suppressed"], 0)
+        scan = self.store.create_scan("R2", "release", [_finding()], suppressed=2)
+        self.assertEqual(scan["stats"]["suppressed"], 2)
+        self.assertEqual(self.store.get_scan(scan["id"])["stats"]["suppressed"], 2)
+
+    def test_resolve_finding_keeps_suppressed(self):
+        scan = self.store.create_scan("R1", "release", [_finding()], suppressed=2)
+        updated = self.store.resolve_finding(scan["id"], "abc", True)
+        self.assertEqual(updated["stats"]["suppressed"], 2)
+
     def test_resolve_finding_updates_stats(self):
         scan = self.store.create_scan("R1", "release", [_finding()])
         updated = self.store.resolve_finding(scan["id"], "abc", True)

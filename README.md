@@ -40,6 +40,9 @@ Open <http://localhost:8080>. The service exposes:
   "screenshots": [
     {"image": "img/dashboard.png", "page": "help/dashboard.md", "baseline_hash": "a1", "current_hash": "b2"}
   ],
+  "rules": [
+    {"kind": "label", "page": "help/*.md", "value": "Save", "reason": "intentional example label"}
+  ],
   "metrics": {"help/getting-started.md": {"views": 3200, "tickets": 4}}
 }
 ```
@@ -48,6 +51,13 @@ Only `pages` is required. Every changed label/route that still appears in a doc
 page becomes a finding. Screenshots flagged as changed (explicit `"changed": true`,
 differing `baseline_hash`/`current_hash`, or `changed_pixels > 0`) that are
 embedded in a page become findings too.
+
+`rules` is an optional list of suppressions that keeps known-benign findings out
+of the list: each rule optionally pins a change `kind` (`label`, `route`,
+`screenshot` or `*`), a `page` glob and a case-insensitive `value` substring
+matched against the finding's old value (or screenshot image path). Rules are
+evaluated per scan and never persisted globally; matched findings are excluded
+from scoring and export, and their count is reported as `stats.suppressed`.
 
 ### Example
 
