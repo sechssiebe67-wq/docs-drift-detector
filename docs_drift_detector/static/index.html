@@ -53,6 +53,12 @@
     <h2>New scan</h2>
     <label for="name">Release name</label>
     <input id="name" placeholder="Release 4.2">
+    <label for="workspace">Workspace (optional)</label>
+    <input id="workspace" placeholder="ws1">
+    <p id="workspace-note" class="muted" hidden>
+      Stored rules for this workspace will be applied.
+      <a href="#rules-library" id="workspace-note-link">View / edit stored rules</a>.
+    </p>
     <label for="changelog">Changelog or unified diff (release trigger)</label>
     <textarea id="changelog" placeholder='renamed "Save" to "Save changes"'></textarea>
     <label for="docs">Reference docs — separate pages with <code>===== path =====</code> lines</label>
@@ -67,6 +73,21 @@
       <button id="analyze" class="primary">Analyze preview</button>
       <button id="save">Save scan</button>
       <span id="status" role="status" aria-live="polite"></span>
+    </div>
+  </section>
+
+  <section id="rules-library">
+    <h2>Workspace rule library</h2>
+    <p class="muted">Persist ignore rules per workspace so common suppressions are reused across scans. Per-scan rules take precedence and both are applied.</p>
+    <label for="ws-name">Workspace</label>
+    <input id="ws-name" placeholder="ws1">
+    <label for="ws-rules">Stored rules JSON — [{"kind":"label","page":"help/*.md","value":"Save","reason":"intentional in docs"}]</label>
+    <textarea id="ws-rules" placeholder='[]'></textarea>
+    <div class="row">
+      <button id="ws-load">Load</button>
+      <button id="ws-save" class="primary">Save library</button>
+      <button id="ws-clear">Clear library</button>
+      <span id="ws-status" class="muted" role="status" aria-live="polite"></span>
     </div>
   </section>
 
@@ -110,7 +131,8 @@ function parseJson(text, fallback, status) {
 }
 
 function buildPayload() {
-  return {
+  const workspace = $("workspace").value.trim();
+  const payload = {
     name: $("name").value.trim() || "Release scan",
     changelog: $("changelog").value,
     pages: parseDocs($("docs").value),
@@ -118,6 +140,8 @@ function buildPayload() {
     screenshots: parseJson($("screenshots").value, [], "screenshots"),
     rules: parseJson($("rules").value, [], "rules"),
   };
+  if (workspace) { payload.workspace = workspace; }
+  return payload;
 }
 
 async function api(method, url, body) {
@@ -223,6 +247,49 @@ async function loadScans() {
   } catch (e) { $("status").textContent = e.message; }
 }
 
+async function loadWorkspaceRules() {
+  const ws = $("ws-name").value.trim();
+  if (!ws) { $("ws-status").textContent = "Enter a workspace name."; return; }
+  try {
+    const data = await api("GET", "/api/workspaces/" + encodeURIComponent(ws) + "/rules");
+    $("ws-rules").value = JSON.stringify(data.rules || [], null, 2);
+    $("ws-status").textContent = "Loaded " + (data.rules || []).length + " stored rule(s).";
+  } catch (e) { $("ws-status").textContent = e.message; }
+}
+
+async function saveWorkspaceRules() {
+  const ws = $("ws-name").value.trim();
+  if (!ws) { $("ws-status").textContent = "Enter a workspace name."; return; }
+  try {
+    const rules = parseJson($("ws-rules").value, [], "workspace rules");
+    const data = await api("PUT", "/api/workspaces/" + encodeURIComponent(ws) + "/rules", { rules });
+    $("ws-rules").value = JSON.stringify(data.rules || [], null, 2);
+    $("ws-status").textContent = "Saved " + (data.rules || []).length + " rule(s).";
+  } catch (e) { $("ws-status").textContent = e.message; }
+}
+
+async function clearWorkspaceRules() {
+  const ws = $("ws-name").value.trim();
+  if (!ws) { $("ws-status").textContent = "Enter a workspace name."; return; }
+  try {
+    await api("DELETE", "/api/workspaces/" + encodeURIComponent(ws) + "/rules");
+    $("ws-rules").value = "[]";
+    $("ws-status").textContent = "Cleared the library for " + ws + ".";
+  } catch (e) { $("ws-status").textContent = e.message; }
+}
+
+function syncWorkspaceNote() {
+  $("workspace-note").hidden = !$("workspace").value.trim();
+}
+
+$("workspace").addEventListener("input", syncWorkspaceNote);
+$("workspace-note-link").addEventListener("click", () => {
+  $("ws-name").value = $("workspace").value.trim();
+  loadWorkspaceRules();
+});
+$("ws-load").addEventListener("click", loadWorkspaceRules);
+$("ws-save").addEventListener("click", saveWorkspaceRules);
+$("ws-clear").addEventListener("click", clearWorkspaceRules);
 $("analyze").addEventListener("click", () => run(false));
 $("save").addEventListener("click", () => run(true));
 loadScans();

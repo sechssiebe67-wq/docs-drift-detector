@@ -167,6 +167,29 @@ class DetectDriftTest(unittest.TestCase):
         self.assertEqual(analyze.summarise([], suppressed=3)["suppressed"], 3)
         self.assertEqual(analyze.summarise([], suppressed="bad")["suppressed"], 0)
 
+    def test_normalise_rules_accepts_store_shapes(self):
+        rules = analyze._normalise_rules(
+            [
+                {"kind": "label", "value": "Save"},
+                {"value": "Projects"},
+                "Bare string",
+            ]
+        )
+        self.assertEqual([r["value"] for r in rules], ["Save", "Projects", "Bare string"])
+        self.assertEqual(rules[0]["kind"], "label")
+        self.assertEqual(rules[1]["kind"], "*")
+        self.assertEqual(rules[2], {"kind": "*", "page": "", "value": "Bare string", "reason": ""})
+
+    def test_normalise_rules_accepts_bare_dict(self):
+        rules = analyze._normalise_rules({"kind": "route", "value": "/settings"})
+        self.assertEqual(len(rules), 1)
+        self.assertEqual(rules[0]["kind"], "route")
+        self.assertEqual(rules[0]["value"], "/settings")
+
+    def test_normalise_rules_drops_malformed(self):
+        for bad in (None, 123, "not-a-list", True, [123], [None], ["  "], [{"unknown": 1}]):
+            self.assertEqual(analyze._normalise_rules(bad), [])
+
 
 if __name__ == "__main__":
     unittest.main()
