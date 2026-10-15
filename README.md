@@ -23,6 +23,7 @@ Open <http://localhost:8080>. The service exposes:
 - `POST /api/scans` — create a scan (release trigger + docs + screenshots).
 - `POST /api/analyze` — stateless analysis, returns findings without storing.
 - `GET  /api/scans/{id}` — scan detail with findings.
+- `GET  /api/scans/{id}/suppressed` — per-rule suppressed-finding drill-down.
 - `GET  /api/scans/{id}/export.md` — Markdown checklist export.
 - `POST /api/scans/{id}/findings/{fid}/resolve` — set `{"resolved": true|false}`.
 - `DELETE /api/scans/{id}` — delete a scan.
@@ -74,6 +75,52 @@ reports `stats.suppressed_rules`: a list of
 `{"id", "origin", "kind", "page", "value", "count"}` entries, one per matching
 rule, sorted by descending `count` then `id`. This makes it possible to audit
 *why* each finding was suppressed and which rule (and library) did it.
+
+### Suppressed finding drill-down
+
+A stored scan also records the exact findings each rule hid, so you can see
+*what* was suppressed and not only *how many* items. The details are persisted
+on the scan under `suppressed_details` and are exposed per rule:
+
+```sh
+curl -sS localhost:8080/api/scans/<scan-id>/suppressed | python3 -m json.tool
+```
+
+`GET /api/scans/{id}/suppressed` returns HTTP 200 with:
+
+```json
+{
+  "scan": "a1b2c3d4e5f6",
+  "suppressed": 2,
+  "rules": [
+    {
+      "rule_id": "ab12cd34ef56",
+      "origin": "workspace",
+      "kind": "label",
+      "page": "",
+      "value": "Save",
+      "count": 1,
+      "findings": [
+        {
+          "id": "0f9c...",
+          "kind": "label",
+          "page": "help/getting-started.md",
+          "old_value": "Save",
+          "new_value": "Save changes",
+          "score": 40.2,
+          "severity": "medium"
+        }
+      ]
+    }
+  ]
+}
+```
+
+`suppressed` is the same integer as `stats.suppressed`. Each entry in `rules`
+carries the matching rule metadata, a `count` and a `findings` list sorted by
+descending `score`, then `page`, then `id`. Only rules that suppressed at least
+one finding appear. An unknown scan id returns HTTP 404 and an invalid scan id
+returns HTTP 400.
 
 ### Workspace rule libraries
 

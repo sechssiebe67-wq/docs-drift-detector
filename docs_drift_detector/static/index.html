@@ -42,6 +42,7 @@
   table.provenance { width:100%; border-collapse:collapse; margin-top:.4rem; font-size:.82rem; }
   table.provenance th, table.provenance td { text-align:left; padding:.3rem .5rem; border-bottom:1px solid var(--line); }
   table.provenance th { color:var(--muted); font-weight:600; }
+  .suppressed-findings { margin-top:.6rem; }
   #status { min-height:1.2rem; font-size:.85rem; color:var(--muted); }
   a { color:var(--accent); }
 </style>
@@ -164,9 +165,77 @@ async function api(method, url, body) {
   return data;
 }
 
-function renderSuppressed(stats) {
+let suppressedCache = {};
+
+function suppressedTitle(f) {
+  const kind = f.kind === "route" ? "Route" : f.kind === "screenshot" ? "Screenshot" : "UI label";
+  return kind + ' "' + (f.old_value || "") + '"';
+}
+
+async function toggleSuppressedRule(scanId, rule, btn, detailsBox) {
+  if (btn.getAttribute("aria-expanded") === "true") {
+    btn.setAttribute("aria-expanded", "false");
+    btn.textContent = "Show";
+    detailsBox.textContent = "";
+    detailsBox.hidden = true;
+    return;
+  }
+  $("status").textContent = "Loading suppressed findings…";
+  try {
+    let data = suppressedCache[scanId];
+    if (!data) {
+      data = await api("GET", "/api/scans/" + scanId + "/suppressed");
+      suppressedCache[scanId] = data;
+    }
+    const match = (data.rules || []).find(
+      (r) => r.rule_id === rule.id && (r.origin || "") === (rule.origin || "")
+    );
+    const findings = match ? match.findings || [] : [];
+    detailsBox.textContent = "";
+    detailsBox.hidden = false;
+    const heading = document.createElement("p");
+    heading.className = "muted";
+    heading.textContent = "Findings suppressed by rule " + rule.id + ":";
+    detailsBox.appendChild(heading);
+    if (!findings.length) {
+      const p = document.createElement("p");
+      p.className = "muted";
+      p.textContent = "No suppressed findings recorded for this rule.";
+      detailsBox.appendChild(p);
+    } else {
+      for (const f of findings) {
+        const el = document.createElement("div");
+        el.className = "finding";
+        const h = document.createElement("h3");
+        const badge = document.createElement("span");
+        badge.className = "badge " + (f.severity || "low");
+        badge.textContent = (f.severity || "").toUpperCase();
+        h.appendChild(badge);
+        h.appendChild(document.createTextNode(suppressedTitle(f)));
+        el.appendChild(h);
+        const meta = document.createElement("div");
+        meta.className = "muted";
+        meta.textContent = "page " + (f.page || "") +
+          (f.score !== undefined ? " · score " + f.score : "");
+        el.appendChild(meta);
+        const change = document.createElement("div");
+        change.textContent = (f.old_value || "") + " → " + (f.new_value || "(removed)");
+        el.appendChild(change);
+        detailsBox.appendChild(el);
+      }
+    }
+    btn.setAttribute("aria-expanded", "true");
+    btn.textContent = "Hide";
+    $("status").textContent = "Showing " + findings.length + " suppressed finding(s).";
+  } catch (e) {
+    $("status").textContent = e.message;
+  }
+}
+
+function renderSuppressed(stats, scanId) {
   const box = $("suppressed");
   box.textContent = "";
+  suppressedCache = {};
   const rows = Array.isArray(stats.suppressed_rules) ? stats.suppressed_rules : [];
   if (!rows.length) return;
   const caption = document.createElement("p");
@@ -177,13 +246,18 @@ function renderSuppressed(stats) {
   table.className = "provenance";
   const thead = document.createElement("thead");
   const headRow = document.createElement("tr");
-  for (const label of ["Rule id", "Origin", "Kind", "Page", "Value", "Count"]) {
+  const labels = ["Rule id", "Origin", "Kind", "Page", "Value", "Count"];
+  if (scanId) labels.push("Details");
+  for (const label of labels) {
     const th = document.createElement("th");
     th.textContent = label;
     headRow.appendChild(th);
   }
   thead.appendChild(headRow);
   table.appendChild(thead);
+  const detailsBox = document.createElement("div");
+  detailsBox.className = "suppressed-findings";
+  detailsBox.hidden = true;
   const tbody = document.createElement("tbody");
   for (const rule of rows) {
     const tr = document.createElement("tr");
@@ -200,10 +274,22 @@ function renderSuppressed(stats) {
       td.textContent = String(value === undefined || value === null ? "" : value);
       tr.appendChild(td);
     }
+    if (scanId) {
+      const td = document.createElement("td");
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = "Show";
+      btn.setAttribute("aria-expanded", "false");
+      btn.setAttribute("aria-label", "Show suppressed findings for rule " + rule.id);
+      btn.addEventListener("click", () => toggleSuppressedRule(scanId, rule, btn, detailsBox));
+      td.appendChild(btn);
+      tr.appendChild(td);
+    }
     tbody.appendChild(tr);
   }
   table.appendChild(tbody);
   box.appendChild(table);
+  if (scanId) box.appendChild(detailsBox);
 }
 
 function renderFindings(scan) {
@@ -215,7 +301,7 @@ function renderFindings(scan) {
     (stats.unresolved || 0) + " open · " + (stats.high || 0) + " high";
   if (stats.suppressed > 0) { summary += " · " + stats.suppressed + " suppressed"; }
   $("summary").textContent = summary;
-  renderSuppressed(stats);
+  renderSuppressed(stats, scan.id);
   if (scan.id) {
     $("export").hidden = false;
     $("export").href = "/api/scans/" + scan.id + "/export.md";

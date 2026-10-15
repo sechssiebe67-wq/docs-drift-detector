@@ -217,6 +217,71 @@ class DetectDriftTest(unittest.TestCase):
         self.assertEqual(breakdown[0]["count"], 2)
         self.assertEqual(report["suppressed"], 3)
 
+    def test_suppression_details_record_findings_per_rule(self):
+        changes = {"labels": [{"old": "Save", "new": "Save changes"}], "routes": []}
+        pages = [
+            {"path": "help/a.md", "content": "Save here."},
+            {"path": "help/b.md", "content": "Save there."},
+        ]
+        rules = analyze._normalise_rules(
+            [{"kind": "label", "value": "Save"}], origin="workspace"
+        ) + analyze._normalise_rules(
+            [{"kind": "label", "value": "Nonexistent"}], origin="request"
+        )
+        report = {}
+        findings = analyze.detect_drift(changes, pages=pages, rules=rules, stats=report)
+        self.assertEqual(findings, [])
+        details = report["suppressed_details"]
+        self.assertEqual(len(details), 1)
+        entry = details[0]
+        self.assertEqual(entry["rule_id"], analyze._rule_id("label", "", "Save"))
+        self.assertEqual(entry["origin"], "workspace")
+        self.assertEqual(entry["kind"], "label")
+        self.assertEqual(entry["value"], "Save")
+        for detail in entry["findings"]:
+            self.assertEqual(
+                set(detail),
+                {"id", "kind", "page", "old_value", "new_value", "score", "severity"},
+            )
+        self.assertEqual(
+            [d["page"] for d in entry["findings"]], ["help/a.md", "help/b.md"]
+        )
+        self.assertEqual(entry["findings"][0]["old_value"], "Save")
+        self.assertEqual(entry["findings"][0]["new_value"], "Save changes")
+
+    def test_suppression_details_omit_rules_matching_nothing(self):
+        changes = {"labels": [{"old": "Save", "new": "Save changes"}], "routes": []}
+        report = {}
+        analyze.detect_drift(
+            changes,
+            pages=self._pages(),
+            rules=[{"kind": "label", "value": "NotPresent"}],
+            stats=report,
+        )
+        self.assertEqual(report["suppressed"], 0)
+        self.assertEqual(report["suppressed_details"], [])
+
+    def test_suppression_details_empty_without_rules(self):
+        changes = {"labels": [{"old": "Save", "new": "Save changes"}], "routes": []}
+        report = {}
+        analyze.detect_drift(changes, pages=self._pages(), stats=report)
+        self.assertEqual(report["suppressed_details"], [])
+
+    def test_suppression_details_helper_sorts_by_score_then_page(self):
+        pre_suppression = [
+            {"id": "b", "kind": "label", "page": "help/a.md", "old_value": "Save",
+             "new_value": "Store", "score": 50.0, "severity": "medium"},
+            {"id": "a", "kind": "label", "page": "help/a.md", "old_value": "Save",
+             "new_value": "Store", "score": 80.0, "severity": "high"},
+            {"id": "c", "kind": "label", "page": "help/b.md", "old_value": "Save",
+             "new_value": "Store", "score": 50.0, "severity": "medium"},
+        ]
+        details = analyze.suppression_details(
+            pre_suppression, [{"kind": "label", "value": "Save"}]
+        )
+        self.assertEqual(len(details), 1)
+        self.assertEqual([d["id"] for d in details[0]["findings"]], ["a", "b", "c"])
+
     def test_detect_drift_without_stats_does_not_raise(self):
         changes = {"labels": [{"old": "Save", "new": "Save changes"}], "routes": []}
         findings = analyze.detect_drift(

@@ -468,6 +468,67 @@ def severity_for(score: float) -> str:
     return "low"
 
 
+def suppression_details(
+    findings: List[Dict[str, Any]], rules: Any
+) -> List[Dict[str, Any]]:
+    """Group suppressed findings by the rule that matched them.
+
+    ``findings`` must be the already-normalised findings *before* suppression
+    (each carrying ``score`` and ``severity``). ``rules`` is accepted in any
+    shape understood by :func:`_normalise_rules`. The result is a list of
+    ``{rule_id, origin, kind, page, value, findings}`` entries, one per rule
+    that actually suppressed at least one finding; rules matching nothing are
+    omitted. Each ``findings`` list holds
+    ``{id, kind, page, old_value, new_value, score, severity}`` entries sorted
+    by descending score, then page, then id.
+    """
+    normalised_rules = _normalise_rules(rules)
+    if not normalised_rules:
+        return []
+
+    buckets: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for rule in normalised_rules:
+        key = (rule["id"], rule["origin"])
+        buckets.setdefault(key, {"rule": rule, "findings": []})
+
+    for finding in findings:
+        matched = _match_rule(finding, normalised_rules)
+        if matched is None:
+            continue
+        key = (matched["id"], matched["origin"])
+        buckets[key]["findings"].append(
+            {
+                "id": finding.get("id"),
+                "kind": finding.get("kind"),
+                "page": finding.get("page"),
+                "old_value": finding.get("old_value"),
+                "new_value": finding.get("new_value"),
+                "score": finding.get("score", 0.0),
+                "severity": finding.get("severity", ""),
+            }
+        )
+
+    result = []
+    for bucket in buckets.values():
+        entries = bucket["findings"]
+        if not entries:
+            continue
+        entries.sort(key=lambda f: (-f["score"], f["page"] or "", f["id"] or ""))
+        rule = bucket["rule"]
+        result.append(
+            {
+                "rule_id": rule["id"],
+                "origin": rule["origin"],
+                "kind": rule["kind"],
+                "page": rule["page"],
+                "value": rule["value"],
+                "findings": entries,
+            }
+        )
+    result.sort(key=lambda entry: (-len(entry["findings"]), entry["rule_id"]))
+    return result
+
+
 def detect_drift(
     changes: Dict[str, List[Dict[str, str]]],
     pages: Optional[Iterable[Any]] = None,
@@ -490,6 +551,14 @@ def detect_drift(
             findings.extend(_screenshot_drift(shot, normalised_pages, metrics))
 
     findings = _dedupe_findings(findings)
+
+    for finding in findings:
+        base = finding.pop("base")
+        signals = finding.get("metrics") or {}
+        finding["score"] = score_finding(base, signals.get("views", 0.0), signals.get("tickets", 0.0))
+        finding["severity"] = severity_for(finding["score"])
+
+    all_findings = findings
 
     suppressed = 0
     suppressed_counts: Dict[Tuple[str, str], int] = {}
@@ -525,16 +594,13 @@ def detect_drift(
         )
     suppressed_rules.sort(key=lambda r: (-r["count"], r["id"]))
 
-    for finding in findings:
-        base = finding.pop("base")
-        signals = finding.get("metrics") or {}
-        finding["score"] = score_finding(base, signals.get("views", 0.0), signals.get("tickets", 0.0))
-        finding["severity"] = severity_for(finding["score"])
+    details = suppression_details(all_findings, normalised_rules)
 
     findings.sort(key=lambda f: (-f["score"], f["page"], f["id"]))
     if stats is not None:
         stats["suppressed"] = suppressed
         stats["suppressed_rules"] = suppressed_rules
+        stats["suppressed_details"] = details
     return findings
 
 

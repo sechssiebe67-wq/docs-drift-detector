@@ -144,6 +144,40 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"workspace": parts[2], "history": history})
         if parts == ["api", "scans"]:
             return self._json(200, {"scans": self.server.store.list_scans()})
+        if len(parts) == 4 and parts[:2] == ["api", "scans"] and parts[3] == "suppressed":
+            if not _valid_id(parts[2]):
+                return self._error(400, "invalid scan id")
+            scan = self.server.store.get_scan(parts[2])
+            if scan is None:
+                return self._error(404, "scan not found")
+            details = scan.get("suppressed_details") or []
+            rules = []
+            for entry in details:
+                if not isinstance(entry, dict):
+                    continue
+                findings = entry.get("findings")
+                if not isinstance(findings, list):
+                    findings = []
+                rules.append(
+                    {
+                        "rule_id": entry.get("rule_id"),
+                        "origin": entry.get("origin"),
+                        "kind": entry.get("kind"),
+                        "page": entry.get("page"),
+                        "value": entry.get("value"),
+                        "count": len(findings),
+                        "findings": findings,
+                    }
+                )
+            stats = scan.get("stats") or {}
+            return self._json(
+                200,
+                {
+                    "scan": scan["id"],
+                    "suppressed": stats.get("suppressed", 0),
+                    "rules": rules,
+                },
+            )
         if len(parts) == 3 and parts[:2] == ["api", "scans"] and _valid_id(parts[2]):
             scan = self.server.store.get_scan(parts[2])
             if scan is None:
@@ -166,6 +200,8 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if len(parts) > 4 and parts[:2] == ["api", "scans"] and parts[-1] == "suppressed":
+            return self._error(400, "invalid scan id")
         return self._error(404, "not found")
 
     def do_HEAD(self) -> None:  # noqa: N802
@@ -281,11 +317,13 @@ class Handler(BaseHTTPRequestHandler):
         )
         suppressed = report.get("suppressed", 0)
         suppressed_rules = report.get("suppressed_rules", [])
+        suppressed_details = report.get("suppressed_details", [])
         return changes, findings, {
             "pages": pages,
             "metrics": metrics,
             "suppressed": suppressed,
             "suppressed_rules": suppressed_rules,
+            "suppressed_details": suppressed_details,
         }
 
     def _merge_rules(self, request_rules: Any, workspace: Optional[str]) -> List[Dict[str, str]]:
@@ -349,6 +387,7 @@ class Handler(BaseHTTPRequestHandler):
             suppressed=extra["suppressed"],
             workspace=workspace,
             suppressed_rules=extra["suppressed_rules"],
+            suppressed_details=extra["suppressed_details"],
         )
         return self._json(201, scan)
 

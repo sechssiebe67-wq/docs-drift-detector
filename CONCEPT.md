@@ -87,7 +87,15 @@ manual review marathon.
   `stats.suppressed` total for backwards compatibility and adds
   `stats.suppressed_rules`, a per-rule breakdown of `{id, origin, kind, page,
   value, count}` sorted by descending count, so teams can audit *why* findings
-  were suppressed and which rule did it.
+  were suppressed and which rule did it. Each scan also records the optional
+  `workspace` it belongs to.
+- **Per-rule suppression drill-down.** A stored scan persists the exact findings
+  each rule suppressed, under `suppressed_details`, and exposes them through
+  `GET /api/scans/{id}/suppressed` as `{scan, suppressed, rules}`. Every rule
+  entry adds a `count` and a `findings` list of `{id, kind, page, old_value,
+  new_value, score, severity}` sorted by descending score then page then id, so a
+  documentation lead can see *what* a rule hid, not only *how many* items it hid.
+  The web UI expands these findings inline beneath the provenance table.
 - **Operational endpoints.** `GET /healthz` plus a stateless JSON API.
 
 ## Differentiation
@@ -99,6 +107,9 @@ release-to-docs comparison with text and screenshot matching.
 
 ## Next direction
 
+- Build on the per-rule suppression drill-down endpoint (shipped in this
+  repository as `GET /api/scans/{id}/suppressed`) to power the planned outbound
+  webhook / pull-request suggestion for the documentation repo.
 - Optional outbound webhook / pull-request suggestion for the documentation repo.
 - Screenshot diffing with per-region highlighting instead of change signals.
 - Pluggable connectors for GitHub commit ranges and rendered docs sites.
