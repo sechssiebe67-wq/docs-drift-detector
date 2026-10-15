@@ -78,6 +78,54 @@ class StoreTest(unittest.TestCase):
         self.assertFalse(self.store.delete_scan(scan["id"]))
         self.assertIsNone(self.store.get_scan(scan["id"]))
 
+    def test_create_scan_persists_workspace(self):
+        scan = self.store.create_scan("R1", "release", [_finding()], workspace="ws1")
+        self.assertEqual(scan["workspace"], "ws1")
+        self.assertEqual(self.store.get_scan(scan["id"])["workspace"], "ws1")
+
+    def test_create_scan_without_workspace_has_no_key(self):
+        scan = self.store.create_scan("R1", "release", [_finding()])
+        self.assertNotIn("workspace", scan)
+
+    def test_workspace_rules_crud(self):
+        self.assertEqual(self.store.list_workspace_rules("ws1"), [])
+        saved = self.store.set_workspace_rules("ws1", [{"kind": "label", "value": "Save"}])
+        self.assertEqual(saved[0]["value"], "Save")
+        self.assertEqual(self.store.list_workspace_rules("ws1"), saved)
+        self.assertTrue(self.store.delete_workspace_rules("ws1"))
+        self.assertEqual(self.store.list_workspace_rules("ws1"), [])
+
+    def test_workspace_rules_persist_across_instances(self):
+        self.store.set_workspace_rules("ws1", [{"kind": "label", "value": "Save"}])
+        reopened = Store(self.path)
+        self.assertEqual(reopened.list_workspace_rules("ws1")[0]["value"], "Save")
+
+    def test_workspace_rules_malformed_input_tolerated(self):
+        saved = self.store.set_workspace_rules(
+            "ws1",
+            [123, None, "  ", {"unknown": 1}, "Bare", {"kind": "label", "value": "Keep"}],
+        )
+        values = [rule["value"] for rule in saved]
+        self.assertEqual(sorted(values), ["Bare", "Keep"])
+        self.assertEqual(len(saved), 2)
+
+    def test_workspace_rules_reject_invalid_names(self):
+        for bad in ("bad id!", "", "a" * 65, "a/b", None):
+            with self.assertRaises(ValueError):
+                self.store.set_workspace_rules(bad, [])
+            with self.assertRaises(ValueError):
+                self.store.list_workspace_rules(bad)
+            with self.assertRaises(ValueError):
+                self.store.delete_workspace_rules(bad)
+
+    def test_old_store_without_workspace_rules_key_loads(self):
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write('{"scans": {}}')
+        reopened = Store(self.path)
+        self.assertEqual(reopened.list_workspace_rules("ws1"), [])
+        reopened.set_workspace_rules("ws1", ["Save"])
+        self.assertEqual(reopened.list_workspace_rules("ws1")[0]["value"], "Save")
+
     @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root bypasses filesystem permissions")
     def test_create_scan_survives_write_failure(self):
         directory = os.path.join(self.tmp.name, "ro")

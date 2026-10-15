@@ -26,12 +26,16 @@ Open <http://localhost:8080>. The service exposes:
 - `GET  /api/scans/{id}/export.md` — Markdown checklist export.
 - `POST /api/scans/{id}/findings/{fid}/resolve` — set `{"resolved": true|false}`.
 - `DELETE /api/scans/{id}` — delete a scan.
+- `GET  /api/workspaces/{ws}/rules` — read the stored rule library (`[]` when unset).
+- `PUT  /api/workspaces/{ws}/rules` — replace the library with `{"rules": [...]}`.
+- `DELETE /api/workspaces/{ws}/rules` — clear the library.
 
 ### Scan request body
 
 ```json
 {
   "name": "Release 4.2",
+  "workspace": "ws1",
   "changelog": "renamed \"Save\" to \"Save changes\"\n\"/settings\" -> \"/account/settings\"",
   "diff": "optional unified diff; quoted strings in + / - lines are compared",
   "labels": [{"old": "Save", "new": "Save changes"}],
@@ -55,9 +59,29 @@ embedded in a page become findings too.
 `rules` is an optional list of suppressions that keeps known-benign findings out
 of the list: each rule optionally pins a change `kind` (`label`, `route`,
 `screenshot` or `*`), a `page` glob and a case-insensitive `value` substring
-matched against the finding's old value (or screenshot image path). Rules are
-evaluated per scan and never persisted globally; matched findings are excluded
-from scoring and export, and their count is reported as `stats.suppressed`.
+matched against the finding's old value (or screenshot image path). Matched
+findings are excluded from scoring and export, and their count is reported as
+`stats.suppressed`. Malformed rules are ignored silently.
+
+### Workspace rule libraries
+
+`workspace` is an optional name (`[A-Za-z0-9_-]{1,64}`) recorded on a scan.
+Rules can be persisted once per workspace and reused across scans instead of
+being pasted into every request. When a scan/create or analyze request carries a
+`workspace`, the stored library rules are merged with the request `rules`: the
+per-scan `rules` take precedence and **both** sets are applied, so the combined
+suppressions are reflected in `stats.suppressed`. Requests without a `workspace`
+behave exactly as before.
+
+```sh
+curl -sS -X PUT localhost:8080/api/workspaces/ws1/rules \
+  -H 'content-type: application/json' \
+  --data '{"rules":[{"kind":"label","value":"Save"}]}' | python3 -m json.tool
+```
+
+Invalid workspace ids (for example `bad id!`) return HTTP 400 on all three
+workspace endpoints. The same name restriction applies when a scan or analyze
+request carries a `workspace`.
 
 ### Example
 

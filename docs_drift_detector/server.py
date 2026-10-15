@@ -103,6 +103,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_static("index.html")
         if parts and parts[0] == "static":
             return self._serve_static("/".join(parts[1:]) or "index.html")
+        if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "rules":
+            if not _valid_id(parts[2]):
+                return self._error(400, "invalid workspace id")
+            return self._json(200, {"rules": self.server.store.list_workspace_rules(parts[2])})
         if parts == ["api", "scans"]:
             return self._json(200, {"scans": self.server.store.list_scans()})
         if len(parts) == 3 and parts[:2] == ["api", "scans"] and _valid_id(parts[2]):
@@ -157,9 +161,27 @@ class Handler(BaseHTTPRequestHandler):
     def do_PATCH(self) -> None:  # noqa: N802
         self.do_POST()
 
+    def do_PUT(self) -> None:  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        parts = _split(path)
+        data = self._read_json()
+        if data is None:
+            return self._error(400, "invalid or missing JSON body")
+        if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "rules":
+            if not _valid_id(parts[2]):
+                return self._error(400, "invalid workspace id")
+            rules = self.server.store.set_workspace_rules(parts[2], data.get("rules"))
+            return self._json(200, {"rules": rules})
+        return self._error(404, "not found")
+
     def do_DELETE(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
         parts = _split(path)
+        if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "rules":
+            if not _valid_id(parts[2]):
+                return self._error(400, "invalid workspace id")
+            self.server.store.delete_workspace_rules(parts[2])
+            return self._json(200, {"deleted": parts[2]})
         if len(parts) == 3 and parts[:2] == ["api", "scans"] and _valid_id(parts[2]):
             if self.server.store.delete_scan(parts[2]):
                 return self._json(200, {"deleted": parts[2]})
@@ -167,7 +189,9 @@ class Handler(BaseHTTPRequestHandler):
         return self._error(404, "not found")
 
     # -- handlers ---------------------------------------------------------
-    def _prepare(self, data: Dict[str, Any]) -> Tuple[Dict[str, List[Dict[str, str]]], List[Dict[str, Any]], Dict[str, Any]]:
+    def _prepare(
+        self, data: Dict[str, Any], workspace: Optional[str] = None
+    ) -> Tuple[Dict[str, List[Dict[str, str]]], List[Dict[str, Any]], Dict[str, Any]]:
         pages = self._validate_pages(data.get("pages") or data.get("docs") or [])
         changelog = data.get("changelog") or ""
         diff = data.get("diff") or ""
@@ -183,11 +207,22 @@ class Handler(BaseHTTPRequestHandler):
             pages=pages,
             screenshots=screenshots,
             metrics=metrics,
-            rules=data.get("rules"),
+            rules=self._merge_rules(data.get("rules"), workspace),
             stats=report,
         )
         suppressed = report.get("suppressed", 0)
         return changes, findings, {"pages": pages, "metrics": metrics, "suppressed": suppressed}
+
+    def _merge_rules(self, request_rules: Any, workspace: Optional[str]) -> List[Dict[str, str]]:
+        """Combine per-scan rules with the workspace library.
+
+        Per-scan rules are normalised first and take precedence; both the
+        per-scan rules and the stored workspace rules are applied so that their
+        suppressions are additive.
+        """
+        requested = analyze._normalise_rules(request_rules)
+        stored = self.server.store.list_workspace_rules(workspace) if workspace else []
+        return requested + stored
 
     @staticmethod
     def _validate_pages(raw: Any) -> List[Dict[str, str]]:
@@ -206,7 +241,13 @@ class Handler(BaseHTTPRequestHandler):
         return pages
 
     def _analyze(self, data: Dict[str, Any], store: bool) -> None:
-        changes, findings, extra = self._prepare(data)
+        workspace_raw = data.get("workspace")
+        workspace: Optional[str] = None
+        if workspace_raw:
+            workspace = str(workspace_raw).strip()
+            if not _valid_id(workspace):
+                return self._error(400, "invalid workspace id")
+        changes, findings, extra = self._prepare(data, workspace)
         if not store:
             return self._json(
                 200,
@@ -222,6 +263,7 @@ class Handler(BaseHTTPRequestHandler):
             findings=findings,
             pages=extra["pages"],
             suppressed=extra["suppressed"],
+            workspace=workspace,
         )
         return self._json(201, scan)
 

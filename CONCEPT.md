@@ -56,8 +56,15 @@ manual review marathon.
   before scoring. Each rule optionally pins a change `kind` (`label`, `route`,
   `screenshot` or `*`), a `page` glob and a case-insensitive `value` substring
   matched against the finding's old value (or screenshot image path). Rules are
-  evaluated per scan from the request body and are not persisted as global
-  configuration; the number of suppressed findings is reported in the summary.
+  evaluated from the request body; the number of suppressed findings is reported
+  in the summary. Malformed rules are dropped silently.
+- **Per-workspace rule library.** Ignore rules can be persisted once per
+  workspace and reused across scans (e.g. a label that is intentionally quoted in
+  the docs). A scan records the optional `workspace` it belongs to; stored
+  library rules and any per-scan `rules` are merged, with per-scan rules taking
+  precedence, and the combined suppressions are reported in the summary. The
+  library is managed through `GET`/`PUT`/`DELETE /api/workspaces/{ws}/rules` and
+  is stored alongside scans in the same JSON file.
 - **Operational endpoints.** `GET /healthz` plus a stateless JSON API.
 
 ## Differentiation
@@ -73,8 +80,8 @@ release-to-docs comparison with text and screenshot matching.
 - Screenshot diffing with per-region highlighting instead of change signals.
 - Pluggable connectors for GitHub commit ranges and rendered docs sites.
 - Per-workspace repositories and doc-page quotas for the tiered SaaS plan.
-- Per-workspace ignore-rule libraries so common suppressions are reused across
-  scans instead of being supplied per request.
+- Import/export of workspace rule libraries (e.g. share a library file between
+  environments) and rule provenance in the suppressed-findings summary.
 
 ## Non-goals and known limits
 

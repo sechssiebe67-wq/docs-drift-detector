@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import tempfile
 import threading
 import uuid
@@ -17,9 +18,15 @@ from typing import Any, Dict, List, Optional
 
 from . import analyze
 
+_WORKSPACE_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _valid_workspace(workspace: Any) -> bool:
+    return bool(_WORKSPACE_RE.match(str(workspace or "")))
 
 
 class Store:
@@ -27,6 +34,7 @@ class Store:
         self.path = path
         self._lock = threading.RLock()
         self._scans: Dict[str, Dict[str, Any]] = {}
+        self._workspace_rules: Dict[str, List[Dict[str, str]]] = {}
         self._load()
 
     def _load(self) -> None:
@@ -37,9 +45,19 @@ class Store:
                 data = json.load(handle)
         except (ValueError, OSError):
             return
-        scans = data.get("scans") if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            return
+        scans = data.get("scans")
         if isinstance(scans, dict):
             self._scans = scans
+        workspace_rules = data.get("workspace_rules")
+        if isinstance(workspace_rules, dict):
+            loaded: Dict[str, List[Dict[str, str]]] = {}
+            for workspace, rules in workspace_rules.items():
+                if not isinstance(workspace, str) or not _valid_workspace(workspace):
+                    continue
+                loaded[workspace] = analyze._normalise_rules(rules)
+            self._workspace_rules = loaded
 
     def _persist(self) -> None:
         directory = os.path.dirname(os.path.abspath(self.path))
@@ -47,7 +65,12 @@ class Store:
         fd, tmp = tempfile.mkstemp(dir=directory, prefix=".ddr-", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump({"scans": self._scans}, handle, ensure_ascii=False, indent=2)
+                json.dump(
+                    {"scans": self._scans, "workspace_rules": self._workspace_rules},
+                    handle,
+                    ensure_ascii=False,
+                    indent=2,
+                )
             os.replace(tmp, self.path)
         except BaseException:
             try:
@@ -56,6 +79,35 @@ class Store:
                 pass
             raise
 
+    @staticmethod
+    def _check_workspace(workspace: Any) -> str:
+        if not _valid_workspace(workspace):
+            raise ValueError("invalid workspace id")
+        return str(workspace)
+
+    def list_workspace_rules(self, workspace: str) -> List[Dict[str, str]]:
+        name = self._check_workspace(workspace)
+        with self._lock:
+            rules = self._workspace_rules.get(name, [])
+            return copy.deepcopy(rules)
+
+    def set_workspace_rules(self, workspace: str, rules: Any) -> List[Dict[str, str]]:
+        name = self._check_workspace(workspace)
+        normalised = analyze._normalise_rules(rules)
+        with self._lock:
+            self._workspace_rules[name] = normalised
+            self._persist()
+            return copy.deepcopy(normalised)
+
+    def delete_workspace_rules(self, workspace: str) -> bool:
+        name = self._check_workspace(workspace)
+        with self._lock:
+            existed = name in self._workspace_rules
+            if existed:
+                del self._workspace_rules[name]
+                self._persist()
+            return existed
+
     def create_scan(
         self,
         name: str,
@@ -63,6 +115,7 @@ class Store:
         findings: List[Dict[str, Any]],
         pages: Optional[List[Any]] = None,
         suppressed: int = 0,
+        workspace: Optional[str] = None,
     ) -> Dict[str, Any]:
         with self._lock:
             scan_id = uuid.uuid4().hex[:12]
@@ -74,6 +127,8 @@ class Store:
                 "findings": findings,
                 "stats": analyze.summarise(findings, pages, suppressed),
             }
+            if workspace:
+                scan["workspace"] = self._check_workspace(workspace)
             self._scans[scan_id] = scan
             self._persist()
             return copy.deepcopy(scan)

@@ -164,6 +164,96 @@ class ServerTest(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual(payload["stats"]["suppressed"], 0)
 
+    def test_workspace_rules_lifecycle(self):
+        ws = "wsLifecycle"
+        status, payload = self._json("GET", "/api/workspaces/%s/rules" % ws)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["rules"], [])
+
+        status, payload = self._json(
+            "PUT",
+            "/api/workspaces/%s/rules" % ws,
+            {"rules": [{"kind": "label", "value": "Save"}]},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["rules"][0]["value"], "Save")
+
+        status, payload = self._json("GET", "/api/workspaces/%s/rules" % ws)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["rules"][0]["value"], "Save")
+
+        status, _ = self._json("DELETE", "/api/workspaces/%s/rules" % ws)
+        self.assertEqual(status, 200)
+
+        status, payload = self._json("GET", "/api/workspaces/%s/rules" % ws)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["rules"], [])
+
+    def test_workspace_rules_invalid_id_returns_400(self):
+        status, _ = self._json("GET", "/api/workspaces/bad%20id!/rules")
+        self.assertEqual(status, 400)
+
+        status, _ = self._json("PUT", "/api/workspaces/bad%20id!/rules", {"rules": []})
+        self.assertEqual(status, 400)
+
+        status, _ = self._json("DELETE", "/api/workspaces/bad%20id!/rules")
+        self.assertEqual(status, 400)
+
+    def test_scan_with_workspace_applies_stored_rules(self):
+        ws = "wsScanRules"
+        status, _ = self._json(
+            "PUT", "/api/workspaces/%s/rules" % ws, {"rules": [{"kind": "label", "value": "Save"}]}
+        )
+        self.assertEqual(status, 200)
+        body = {
+            "name": "Workspace scan",
+            "workspace": ws,
+            "changelog": 'renamed "Save" to "Save changes"',
+            "pages": [{"path": "help/a.md", "content": "Click Save."}],
+        }
+        status, scan = self._json("POST", "/api/scans", body)
+        self.assertEqual(status, 201)
+        self.assertEqual(scan["workspace"], ws)
+        self.assertEqual(scan["findings"], [])
+        self.assertEqual(scan["stats"]["suppressed"], 1)
+
+    def test_analyze_combines_workspace_and_inline_rules(self):
+        ws = "wsCombine"
+        status, _ = self._json(
+            "PUT", "/api/workspaces/%s/rules" % ws, {"rules": [{"kind": "label", "value": "Save"}]}
+        )
+        self.assertEqual(status, 200)
+        body = {
+            "workspace": ws,
+            "changelog": 'renamed "Save" to "Save changes"\n"/settings" -> "/account/settings"',
+            "pages": [{"path": "help/a.md", "content": "Click Save. Go to /settings."}],
+            "rules": [{"kind": "route", "value": "/settings"}],
+        }
+        status, payload = self._json("POST", "/api/analyze", body)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["findings"], [])
+        self.assertEqual(payload["stats"]["suppressed"], 2)
+
+    def test_scan_without_workspace_still_uses_inline_rules(self):
+        body = {
+            "changelog": 'renamed "Save" to "Save changes"',
+            "pages": [{"path": "help/a.md", "content": "Click Save."}],
+            "rules": [{"kind": "label", "value": "Save"}],
+        }
+        status, scan = self._json("POST", "/api/scans", body)
+        self.assertEqual(status, 201)
+        self.assertNotIn("workspace", scan)
+        self.assertEqual(scan["stats"]["suppressed"], 1)
+
+    def test_scan_with_invalid_workspace_returns_400(self):
+        body = {
+            "workspace": "bad id!",
+            "changelog": 'renamed "Save" to "Save changes"',
+            "pages": [{"path": "help/a.md", "content": "Click Save."}],
+        }
+        status, _ = self._json("POST", "/api/scans", body)
+        self.assertEqual(status, 400)
+
     def test_bad_json_returns_400(self):
         req = urllib.request.Request(self._url("/api/scans"), data=b"not json", method="POST")
         req.add_header("Content-Type", "application/json")
