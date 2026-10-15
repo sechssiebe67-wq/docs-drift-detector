@@ -409,6 +409,79 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(fetched["stats"]["suppressed_rules"], breakdown)
 
 
+    def test_scan_suppressed_endpoint(self):
+        ws = "wsSuppressed"
+        self._json(
+            "PUT", "/api/workspaces/%s/rules" % ws, {"rules": [{"kind": "label", "value": "Save"}]}
+        )
+        body = {
+            "name": "Suppressed scan",
+            "workspace": ws,
+            "changelog": 'renamed "Save" to "Save changes"\n"/settings" -> "/account/settings"',
+            "pages": [{"path": "help/a.md", "content": "Click Save. Go to /settings."}],
+            "rules": [{"kind": "route", "value": "/settings"}],
+        }
+        status, scan = self._json("POST", "/api/scans", body)
+        self.assertEqual(status, 201)
+        self.assertIn("suppressed_details", scan)
+
+        status, payload = self._json("GET", "/api/scans/%s/suppressed" % scan["id"])
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["scan"], scan["id"])
+        self.assertEqual(payload["suppressed"], 2)
+        self.assertEqual(len(payload["rules"]), 2)
+        by_origin = {entry["origin"]: entry for entry in payload["rules"]}
+        self.assertEqual(set(by_origin), {"workspace", "request"})
+        for entry in payload["rules"]:
+            self.assertEqual(
+                set(entry), {"rule_id", "origin", "kind", "page", "value", "count", "findings"}
+            )
+            self.assertEqual(entry["count"], len(entry["findings"]))
+            self.assertEqual(entry["count"], 1)
+        finding = by_origin["workspace"]["findings"][0]
+        self.assertEqual(
+            set(finding),
+            {"id", "kind", "page", "old_value", "new_value", "score", "severity"},
+        )
+        self.assertEqual(finding["old_value"], "Save")
+        self.assertEqual(finding["new_value"], "Save changes")
+        self.assertEqual(finding["page"], "help/a.md")
+
+    def test_scan_suppressed_endpoint_unknown_returns_404(self):
+        status, payload = self._json("GET", "/api/scans/doesnotexist123/suppressed")
+        self.assertEqual(status, 404)
+        self.assertIn("error", payload)
+
+    def test_scan_suppressed_endpoint_invalid_id_returns_400(self):
+        status, _ = self._json("GET", "/api/scans/bad%20id!/suppressed")
+        self.assertEqual(status, 400)
+        status, _ = self._json("GET", "/api/scans/bad/id/suppressed")
+        self.assertEqual(status, 400)
+
+    def test_scan_without_suppression_has_empty_suppressed_endpoint(self):
+        body = {
+            "changelog": 'renamed "Save" to "Save changes"',
+            "pages": [{"path": "help/a.md", "content": "Click Save."}],
+        }
+        status, scan = self._json("POST", "/api/scans", body)
+        self.assertEqual(status, 201)
+        status, payload = self._json("GET", "/api/scans/%s/suppressed" % scan["id"])
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["suppressed"], 0)
+        self.assertEqual(payload["rules"], [])
+
+    def test_analyze_response_shape_unchanged_by_details(self):
+        body = {
+            "changelog": 'renamed "Save" to "Save changes"',
+            "pages": [{"path": "help/a.md", "content": "Click Save."}],
+            "rules": [{"kind": "label", "value": "Save"}],
+        }
+        status, payload = self._json("POST", "/api/analyze", body)
+        self.assertEqual(status, 200)
+        self.assertEqual(set(payload), {"findings", "stats", "changes"})
+        self.assertIsInstance(payload["stats"]["suppressed"], int)
+        self.assertNotIn("suppressed_details", payload["stats"])
+
     def test_rules_history_fresh_workspace_is_empty(self):
         status, payload = self._json("GET", "/api/workspaces/wsHistFresh/rules/history")
         self.assertEqual(status, 200)

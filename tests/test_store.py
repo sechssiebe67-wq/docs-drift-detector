@@ -135,6 +135,66 @@ class StoreTest(unittest.TestCase):
         reopened = Store(self.path)
         self.assertEqual(reopened.get_scan(scan["id"])["stats"]["suppressed_rules"], breakdown)
 
+    def test_create_scan_persists_suppressed_details(self):
+        details = [
+            {
+                "rule_id": "abc123",
+                "origin": "workspace",
+                "kind": "label",
+                "page": "",
+                "value": "Save",
+                "findings": [
+                    {
+                        "id": "f1",
+                        "kind": "label",
+                        "page": "help/a.md",
+                        "old_value": "Save",
+                        "new_value": "Save changes",
+                        "score": 40.0,
+                        "severity": "medium",
+                    }
+                ],
+            }
+        ]
+        scan = self.store.create_scan(
+            "R1", "release", [], suppressed=1, suppressed_details=details
+        )
+        self.assertEqual(scan["suppressed_details"], details)
+        reopened = Store(self.path)
+        self.assertEqual(reopened.get_scan(scan["id"])["suppressed_details"], details)
+
+    def test_create_scan_without_details_has_empty_list(self):
+        scan = self.store.create_scan("R1", "release", [_finding()])
+        self.assertEqual(scan["suppressed_details"], [])
+
+    def test_resolve_finding_keeps_suppressed_details(self):
+        details = [
+            {
+                "rule_id": "abc123",
+                "origin": "workspace",
+                "kind": "label",
+                "page": "",
+                "value": "Save",
+                "findings": [],
+            }
+        ]
+        scan = self.store.create_scan(
+            "R1", "release", [_finding()], suppressed=1, suppressed_details=details
+        )
+        updated = self.store.resolve_finding(scan["id"], "abc", True)
+        self.assertEqual(updated["suppressed_details"], details)
+
+    def test_old_store_without_suppressed_details_loads_empty(self):
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write(
+                '{"scans": {"oldid": {"id": "oldid", "name": "Old", "stats": {}}}}'
+            )
+        reopened = Store(self.path)
+        scan = reopened.get_scan("oldid")
+        self.assertIsNotNone(scan)
+        self.assertEqual(scan["suppressed_details"], [])
+        self.assertEqual(len(reopened.list_scans()), 1)
+
     def test_resolve_finding_keeps_suppressed_rules(self):
         breakdown = [
             {"id": "abc123", "origin": "workspace", "kind": "label", "page": "", "value": "Save", "count": 2}

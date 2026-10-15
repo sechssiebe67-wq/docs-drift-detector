@@ -80,6 +80,10 @@ class Store:
         scans = data.get("scans")
         if isinstance(scans, dict):
             self._scans = scans
+            for scan in self._scans.values():
+                if isinstance(scan, dict):
+                    details = scan.get("suppressed_details")
+                    scan["suppressed_details"] = details if isinstance(details, list) else []
         workspace_rules = data.get("workspace_rules")
         if isinstance(workspace_rules, dict):
             loaded: Dict[str, List[Dict[str, str]]] = {}
@@ -213,6 +217,7 @@ class Store:
         suppressed: int = 0,
         workspace: Optional[str] = None,
         suppressed_rules: Optional[List[Dict[str, Any]]] = None,
+        suppressed_details: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         with self._lock:
             scan_id = uuid.uuid4().hex[:12]
@@ -223,6 +228,9 @@ class Store:
                 "created_at": _utc_now(),
                 "findings": findings,
                 "stats": analyze.summarise(findings, pages, suppressed, suppressed_rules),
+                "suppressed_details": copy.deepcopy(suppressed_details)
+                if suppressed_details
+                else [],
             }
             if workspace:
                 scan["workspace"] = self._check_workspace(workspace)
