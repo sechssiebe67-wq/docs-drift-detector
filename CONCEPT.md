@@ -96,6 +96,15 @@ manual review marathon.
   new_value, score, severity}` sorted by descending score then page then id, so a
   documentation lead can see *what* a rule hid, not only *how many* items it hid.
   The web UI expands these findings inline beneath the provenance table.
+- **Machine-readable scan summary / webhook payload.** `GET
+  /api/scans/{id}/summary` returns a compact, deterministic JSON drift summary
+  built for downstream automation such as an outbound webhook or a pull-request
+  suggestion against the documentation repo. It reports the scan identity
+  (`id`, `name`, `source`, `created_at` and `workspace` when set), the existing
+  counters (`findings`, `unresolved`, `high`, `suppressed` plus the per-rule
+  `suppressed_rules` passthrough), up to five highest-scoring unresolved
+  `top_findings` and `kinds`/`severities` breakdowns. No timestamps are added at
+  read time, so the same scan always renders to byte-identical JSON.
 - **Operational endpoints.** `GET /healthz` plus a stateless JSON API.
 
 ## Differentiation
@@ -107,10 +116,6 @@ release-to-docs comparison with text and screenshot matching.
 
 ## Next direction
 
-- Build on the per-rule suppression drill-down endpoint (shipped in this
-  repository as `GET /api/scans/{id}/suppressed`) to power the planned outbound
-  webhook / pull-request suggestion for the documentation repo.
-- Optional outbound webhook / pull-request suggestion for the documentation repo.
 - Screenshot diffing with per-region highlighting instead of change signals.
 - Pluggable connectors for GitHub commit ranges and rendered docs sites.
 - Per-workspace repositories and doc-page quotas for the tiered SaaS plan.

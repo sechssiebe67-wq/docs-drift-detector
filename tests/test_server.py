@@ -552,6 +552,88 @@ class ServerTest(unittest.TestCase):
         )
         self.assertEqual(status, 400)
 
+    def test_scan_summary_endpoint(self):
+        body = {
+            "name": "Summary scan",
+            "source": "release-9",
+            "workspace": "wsSummary",
+            "changelog": (
+                'renamed "Save" to "Save changes"\n'
+                'renamed "Delete" to "Remove"\n'
+                '"/settings" -> "/account/settings"'
+            ),
+            "pages": [
+                {"path": "help/a.md", "content": "Click Save. Click Delete. Go to /settings."}
+            ],
+        }
+        status, scan = self._json("POST", "/api/scans", body)
+        self.assertEqual(status, 201)
+        scan_id = scan["id"]
+
+        status, raw, ctype = self._request("GET", "/api/scans/%s/summary" % scan_id)
+        self.assertEqual(status, 200)
+        self.assertEqual(ctype, "application/json; charset=utf-8")
+        summary = json.loads(raw.decode("utf-8"))
+        self.assertEqual(
+            set(summary),
+            {
+                "id",
+                "name",
+                "source",
+                "created_at",
+                "workspace",
+                "stats",
+                "top_findings",
+                "kinds",
+                "severities",
+            },
+        )
+        self.assertEqual(summary["id"], scan_id)
+        self.assertEqual(summary["name"], "Summary scan")
+        self.assertEqual(summary["source"], "release-9")
+        self.assertEqual(summary["workspace"], "wsSummary")
+        for key in ("findings", "unresolved", "high", "suppressed", "suppressed_rules"):
+            self.assertIn(key, summary["stats"])
+        self.assertLessEqual(len(summary["top_findings"]), 5)
+        self.assertEqual(set(summary["kinds"]), {"label", "route", "screenshot"})
+        self.assertEqual(set(summary["severities"]), {"high", "medium", "low"})
+        self.assertEqual(sum(summary["kinds"].values()), summary["stats"]["findings"])
+        self.assertEqual(sum(summary["severities"].values()), summary["stats"]["findings"])
+        scores = [finding["score"] for finding in summary["top_findings"]]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+        for finding in summary["top_findings"]:
+            self.assertEqual(
+                set(finding),
+                {"id", "kind", "page", "old_value", "new_value", "score", "severity"},
+            )
+
+        status, raw2, _ = self._request("GET", "/api/scans/%s/summary" % scan_id)
+        self.assertEqual(status, 200)
+        self.assertEqual(raw, raw2)
+
+    def test_scan_summary_unknown_returns_404(self):
+        status, payload = self._json("GET", "/api/scans/doesnotexist123/summary")
+        self.assertEqual(status, 404)
+        self.assertEqual(payload, {"error": "scan not found"})
+
+    def test_scan_summary_invalid_id_returns_400(self):
+        status, payload = self._json("GET", "/api/scans/bad%20id!/summary")
+        self.assertEqual(status, 400)
+        self.assertEqual(payload, {"error": "invalid scan id"})
+        status, _ = self._json("GET", "/api/scans/bad/id/summary")
+        self.assertEqual(status, 400)
+
+    def test_scan_summary_without_workspace_omits_key(self):
+        body = {
+            "changelog": 'renamed "Save" to "Save changes"',
+            "pages": [{"path": "help/a.md", "content": "Click Save."}],
+        }
+        status, scan = self._json("POST", "/api/scans", body)
+        self.assertEqual(status, 201)
+        status, summary = self._json("GET", "/api/scans/%s/summary" % scan["id"])
+        self.assertEqual(status, 200)
+        self.assertNotIn("workspace", summary)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -178,6 +178,13 @@ class Handler(BaseHTTPRequestHandler):
                     "rules": rules,
                 },
             )
+        if len(parts) == 4 and parts[:2] == ["api", "scans"] and parts[3] == "summary":
+            if not _valid_id(parts[2]):
+                return self._error(400, "invalid scan id")
+            scan = self.server.store.get_scan(parts[2])
+            if scan is None:
+                return self._error(404, "scan not found")
+            return self._json(200, export.summarise_scan(scan))
         if len(parts) == 3 and parts[:2] == ["api", "scans"] and _valid_id(parts[2]):
             scan = self.server.store.get_scan(parts[2])
             if scan is None:
@@ -200,7 +207,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if len(parts) > 4 and parts[:2] == ["api", "scans"] and parts[-1] == "suppressed":
+        if len(parts) > 4 and parts[:2] == ["api", "scans"] and parts[-1] in ("suppressed", "summary"):
             return self._error(400, "invalid scan id")
         return self._error(404, "not found")
 

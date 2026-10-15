@@ -24,6 +24,7 @@ Open <http://localhost:8080>. The service exposes:
 - `POST /api/analyze` — stateless analysis, returns findings without storing.
 - `GET  /api/scans/{id}` — scan detail with findings.
 - `GET  /api/scans/{id}/suppressed` — per-rule suppressed-finding drill-down.
+- `GET  /api/scans/{id}/summary` — compact machine-readable drift summary (webhook payload).
 - `GET  /api/scans/{id}/export.md` — Markdown checklist export.
 - `POST /api/scans/{id}/findings/{fid}/resolve` — set `{"resolved": true|false}`.
 - `DELETE /api/scans/{id}` — delete a scan.
@@ -121,6 +122,61 @@ carries the matching rule metadata, a `count` and a `findings` list sorted by
 descending `score`, then `page`, then `id`. Only rules that suppressed at least
 one finding appear. An unknown scan id returns HTTP 404 and an invalid scan id
 returns HTTP 400.
+
+### Scan summary
+
+`GET /api/scans/{id}/summary` returns a compact, deterministic JSON document
+intended for downstream automation such as an outbound webhook or a
+pull-request suggestion against the documentation repo:
+
+```sh
+curl -sS localhost:8080/api/scans/<scan-id>/summary | python3 -m json.tool
+```
+
+The response is HTTP 200 with `Content-Type: application/json; charset=utf-8`
+and this shape:
+
+```json
+{
+  "id": "a1b2c3d4e5f6",
+  "name": "Release 4.2",
+  "source": "release-4.2",
+  "created_at": "2026-01-01T00:00:00+00:00",
+  "workspace": "ws1",
+  "stats": {
+    "findings": 3,
+    "unresolved": 2,
+    "high": 1,
+    "suppressed": 1,
+    "suppressed_rules": [
+      {"id": "ab12cd34ef56", "origin": "workspace", "kind": "label", "page": "", "value": "Save", "count": 1}
+    ]
+  },
+  "top_findings": [
+    {
+      "id": "0f9c...",
+      "kind": "route",
+      "page": "help/settings.md",
+      "old_value": "/settings",
+      "new_value": "/account/settings",
+      "score": 51.0,
+      "severity": "medium"
+    }
+  ],
+  "kinds": {"label": 1, "route": 2, "screenshot": 0},
+  "severities": {"high": 1, "medium": 2, "low": 0}
+}
+```
+
+`workspace` is only present when the scan belongs to one. `stats` reuses the
+existing counters and passes through `suppressed_rules`. `top_findings` contains
+at most five unresolved findings ordered by descending `score`, then `page`,
+then `id`. `kinds` and `severities` count the stored findings and always expose
+the documented `label`/`route`/`screenshot` and `high`/`medium`/`low` keys. The
+document adds no timestamps at read time, so two requests for an unchanged scan
+return byte-identical JSON. An unknown scan id returns HTTP 404 with
+`{"error": "scan not found"}` and an invalid scan id returns HTTP 400 with
+`{"error": "invalid scan id"}`.
 
 ### Workspace rule libraries
 
