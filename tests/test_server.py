@@ -111,6 +111,59 @@ class ServerTest(unittest.TestCase):
         status, _ = self._json("GET", "/api/scans/" + scan_id)
         self.assertEqual(status, 404)
 
+    def test_analyze_rules_suppress_findings(self):
+        body = {
+            "changelog": 'renamed "Save" to "Save changes"',
+            "pages": [{"path": "help/a.md", "content": "Click Save."}],
+            "rules": [{"kind": "label", "value": "Save"}],
+        }
+        status, payload = self._json("POST", "/api/analyze", body)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["findings"], [])
+        self.assertEqual(payload["stats"]["suppressed"], 1)
+
+    def test_scan_with_rules_persists_suppression(self):
+        body = {
+            "name": "Suppressed scan",
+            "changelog": 'renamed "Save" to "Save changes"\n"/settings" -> "/account/settings"',
+            "pages": [{"path": "help/a.md", "content": "Click Save. Go to /settings."}],
+            "rules": [{"kind": "label", "value": "Save"}],
+        }
+        status, scan = self._json("POST", "/api/scans", body)
+        self.assertEqual(status, 201)
+        self.assertGreaterEqual(scan["stats"]["suppressed"], 1)
+        self.assertEqual([f["kind"] for f in scan["findings"]], ["route"])
+        self.assertNotIn('UI label "Save"', json.dumps(scan["findings"]))
+
+        status, fetched = self._json("GET", "/api/scans/" + scan["id"])
+        self.assertEqual(fetched["stats"]["suppressed"], scan["stats"]["suppressed"])
+
+        status, raw, _ = self._request("GET", "/api/scans/%s/export.md" % scan["id"])
+        self.assertEqual(status, 200)
+        self.assertNotIn(b'UI label "Save"', raw)
+        self.assertIn(b"/settings", raw)
+
+    def test_scan_without_rules_has_zero_suppressed(self):
+        body = {
+            "changelog": 'renamed "Save" to "Save changes"',
+            "pages": [{"path": "help/a.md", "content": "Click Save."}],
+        }
+        status, scan = self._json("POST", "/api/scans", body)
+        self.assertEqual(status, 201)
+        self.assertEqual(scan["stats"]["suppressed"], 0)
+        self.assertEqual(len(scan["findings"]), 1)
+
+    def test_malformed_rules_do_not_error(self):
+        for bad in (123, "not-a-list", [123], [{"unknown": 1}], None):
+            body = {
+                "changelog": 'renamed "Save" to "Save changes"',
+                "pages": [{"path": "help/a.md", "content": "Click Save."}],
+                "rules": bad,
+            }
+            status, payload = self._json("POST", "/api/analyze", body)
+            self.assertEqual(status, 200)
+            self.assertEqual(payload["stats"]["suppressed"], 0)
+
     def test_bad_json_returns_400(self):
         req = urllib.request.Request(self._url("/api/scans"), data=b"not json", method="POST")
         req.add_header("Content-Type", "application/json")

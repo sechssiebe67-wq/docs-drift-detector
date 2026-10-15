@@ -6,6 +6,7 @@ that it can be tested and reused independently of the HTTP layer.
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import math
 import re
@@ -16,6 +17,8 @@ ROUTE_BASE = 5
 SCREENSHOT_BASE = 3
 
 _MAX_VALUE = 200
+
+_RULE_KINDS = ("label", "route", "screenshot", "*")
 
 _QUOTED = r"\"([^\"\n]{1,160})\"|'([^'\n]{1,160})'|`([^`\n]{1,160})`"
 _ROUTE = r"[\"'`](/[A-Za-z0-9_\-.:{}\[\]*]+(?:/[A-Za-z0-9_\-.:{}\[\]*]*)*)[\"'`]"
@@ -120,6 +123,70 @@ def _dedupe_pairs(pairs: Iterable[Dict[str, str]]) -> List[Dict[str, str]]:
         seen.add(key)
         result.append(pair)
     return result
+
+
+def _normalise_rule(entry: Any) -> Optional[Dict[str, str]]:
+    """Normalise a single ignore rule, returning None for malformed entries."""
+    if isinstance(entry, str):
+        value = entry.strip()
+        if not value:
+            return None
+        return {"kind": "*", "page": "", "value": value, "reason": ""}
+    if not isinstance(entry, dict):
+        return None
+
+    kind = entry.get("kind", "*")
+    if not isinstance(kind, str) or kind.strip().lower() not in _RULE_KINDS:
+        kind = "*"
+    else:
+        kind = kind.strip().lower()
+
+    page = entry.get("page", entry.get("path", ""))
+    page = page.strip() if isinstance(page, str) else ""
+
+    value = entry.get("value", entry.get("old_value", entry.get("old", "")))
+    value = value.strip() if isinstance(value, str) else ""
+
+    reason = entry.get("reason", "")
+    reason = reason.strip() if isinstance(reason, str) else ""
+
+    if not page and not value and kind == "*":
+        return None
+    return {"kind": kind, "page": page, "value": value, "reason": reason}
+
+
+def _normalise_rules(rules: Any) -> List[Dict[str, str]]:
+    """Normalise a rules input into a list of rule dicts.
+
+    Accepts a list of dicts or strings (a bare dict is treated as a single
+    rule). Malformed entries are ignored silently so a bad rules value can
+    never raise into the caller.
+    """
+    if isinstance(rules, dict):
+        rules = [rules]
+    if not isinstance(rules, list):
+        return []
+    result = []
+    for entry in rules:
+        rule = _normalise_rule(entry)
+        if rule is not None:
+            result.append(rule)
+    return result
+
+
+def _matches_rule(finding: Dict[str, Any], rules: List[Dict[str, str]]) -> bool:
+    kind = str(finding.get("kind") or "").lower()
+    page = str(finding.get("page") or "")
+    old = str(finding.get("old_value") or "")
+    for rule in rules:
+        if rule["kind"] != "*" and rule["kind"] != kind:
+            continue
+        if rule["page"] and not fnmatch.fnmatch(page, rule["page"]):
+            continue
+        if rule["value"] and rule["value"].lower() not in old.lower():
+            continue
+        return True
+    return False
 
 
 def extract_label_changes(
@@ -378,9 +445,12 @@ def detect_drift(
     pages: Optional[Iterable[Any]] = None,
     screenshots: Optional[Iterable[Any]] = None,
     metrics: Optional[Dict[str, Any]] = None,
+    rules: Any = None,
+    stats: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     normalised_pages = _normalise_pages(pages)
     metrics = metrics or {}
+    normalised_rules = _normalise_rules(rules)
 
     findings: List[Dict[str, Any]] = []
     for change in (changes or {}).get("labels", []):
@@ -392,6 +462,17 @@ def detect_drift(
             findings.extend(_screenshot_drift(shot, normalised_pages, metrics))
 
     findings = _dedupe_findings(findings)
+
+    suppressed = 0
+    if normalised_rules:
+        kept: List[Dict[str, Any]] = []
+        for finding in findings:
+            if _matches_rule(finding, normalised_rules):
+                suppressed += 1
+            else:
+                kept.append(finding)
+        findings = kept
+
     for finding in findings:
         base = finding.pop("base")
         signals = finding.get("metrics") or {}
@@ -399,11 +480,21 @@ def detect_drift(
         finding["severity"] = severity_for(finding["score"])
 
     findings.sort(key=lambda f: (-f["score"], f["page"], f["id"]))
+    if stats is not None:
+        stats["suppressed"] = suppressed
     return findings
 
 
-def summarise(findings: List[Dict[str, Any]], pages: Optional[Iterable[Any]] = None) -> Dict[str, Any]:
+def summarise(
+    findings: List[Dict[str, Any]],
+    pages: Optional[Iterable[Any]] = None,
+    suppressed: Any = 0,
+) -> Dict[str, Any]:
     resolved = sum(1 for f in findings if f.get("resolved"))
+    try:
+        suppressed_count = max(int(suppressed), 0)
+    except (TypeError, ValueError):
+        suppressed_count = 0
     return {
         "findings": len(findings),
         "unresolved": len(findings) - resolved,
@@ -412,4 +503,5 @@ def summarise(findings: List[Dict[str, Any]], pages: Optional[Iterable[Any]] = N
         "medium": sum(1 for f in findings if f.get("severity") == "medium"),
         "low": sum(1 for f in findings if f.get("severity") == "low"),
         "pages": len(_normalise_pages(pages)) if pages is not None else 0,
+        "suppressed": suppressed_count,
     }

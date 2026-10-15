@@ -28,6 +28,14 @@
       "description": "KPI tiles were rearranged."
     }
   ],
+  "rules": [
+    {
+      "kind": "label",
+      "page": "help/getting-started.md",
+      "value": "Save",
+      "reason": "The label is quoted intentionally as an example in the guide."
+    }
+  ],
   "metrics": {
     "help/getting-started.md": {"views": 3200, "tickets": 4},
     "help/dashboard.md": {"views": 180, "tickets": 1}

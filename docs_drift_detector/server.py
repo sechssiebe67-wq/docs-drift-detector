@@ -177,8 +177,17 @@ class Handler(BaseHTTPRequestHandler):
         )
         screenshots = data.get("screenshots") or []
         metrics = data.get("metrics") or {}
-        findings = analyze.detect_drift(changes, pages=pages, screenshots=screenshots, metrics=metrics)
-        return changes, findings, {"pages": pages, "metrics": metrics}
+        report: Dict[str, Any] = {}
+        findings = analyze.detect_drift(
+            changes,
+            pages=pages,
+            screenshots=screenshots,
+            metrics=metrics,
+            rules=data.get("rules"),
+            stats=report,
+        )
+        suppressed = report.get("suppressed", 0)
+        return changes, findings, {"pages": pages, "metrics": metrics, "suppressed": suppressed}
 
     @staticmethod
     def _validate_pages(raw: Any) -> List[Dict[str, str]]:
@@ -203,7 +212,7 @@ class Handler(BaseHTTPRequestHandler):
                 200,
                 {
                     "findings": findings,
-                    "stats": analyze.summarise(findings, extra["pages"]),
+                    "stats": analyze.summarise(findings, extra["pages"], extra["suppressed"]),
                     "changes": changes,
                 },
             )
@@ -212,6 +221,7 @@ class Handler(BaseHTTPRequestHandler):
             source=data.get("source") or "release",
             findings=findings,
             pages=extra["pages"],
+            suppressed=extra["suppressed"],
         )
         return self._json(201, scan)
 

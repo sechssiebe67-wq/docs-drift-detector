@@ -61,6 +61,8 @@
     <textarea id="metrics" placeholder='{}'></textarea>
     <label for="screenshots">Screenshot signals JSON (optional)</label>
     <textarea id="screenshots" placeholder='[{"image":"img/dashboard.png","page":"help/dashboard.md","baseline_hash":"a1","current_hash":"b2"}]'></textarea>
+    <label for="rules">Ignore rules JSON (optional) — [{"kind":"label","page":"help/*.md","value":"Save","reason":"intentional in docs"}]</label>
+    <textarea id="rules" placeholder='[]'></textarea>
     <div class="row">
       <button id="analyze" class="primary">Analyze preview</button>
       <button id="save">Save scan</button>
@@ -114,6 +116,7 @@ function buildPayload() {
     pages: parseDocs($("docs").value),
     metrics: parseJson($("metrics").value, {}, "metrics"),
     screenshots: parseJson($("screenshots").value, [], "screenshots"),
+    rules: parseJson($("rules").value, [], "rules"),
   };
 }
 
@@ -132,8 +135,10 @@ function renderFindings(scan) {
   const box = $("findings"); box.textContent = "";
   $("scan-title").textContent = scan.name ? "— " + scan.name : "";
   const stats = scan.stats || {};
-  $("summary").textContent = (stats.findings || 0) + " findings · " +
+  let summary = (stats.findings || 0) + " findings · " +
     (stats.unresolved || 0) + " open · " + (stats.high || 0) + " high";
+  if (stats.suppressed > 0) { summary += " · " + stats.suppressed + " suppressed"; }
+  $("summary").textContent = summary;
   if (scan.id) {
     $("export").hidden = false;
     $("export").href = "/api/scans/" + scan.id + "/export.md";

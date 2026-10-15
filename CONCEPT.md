@@ -52,6 +52,12 @@ manual review marathon.
   to commit into the documentation repository.
 - **Persistent scans.** Scans are stored in a JSON file on a mounted volume; no
   external database is required.
+- **Ignore rules.** A scan can declare rules that suppress known-benign findings
+  before scoring. Each rule optionally pins a change `kind` (`label`, `route`,
+  `screenshot` or `*`), a `page` glob and a case-insensitive `value` substring
+  matched against the finding's old value (or screenshot image path). Rules are
+  evaluated per scan from the request body and are not persisted as global
+  configuration; the number of suppressed findings is reported in the summary.
 - **Operational endpoints.** `GET /healthz` plus a stateless JSON API.
 
 ## Differentiation
@@ -67,6 +73,8 @@ release-to-docs comparison with text and screenshot matching.
 - Screenshot diffing with per-region highlighting instead of change signals.
 - Pluggable connectors for GitHub commit ranges and rendered docs sites.
 - Per-workspace repositories and doc-page quotas for the tiered SaaS plan.
+- Per-workspace ignore-rule libraries so common suppressions are reused across
+  scans instead of being supplied per request.
 
 ## Non-goals and known limits
 
