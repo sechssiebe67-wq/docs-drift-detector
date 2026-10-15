@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Docs Drift Detector</title>
+<style>
+  :root { color-scheme: light dark; --bg:#f6f7f9; --card:#fff; --fg:#1b1f24; --muted:#5b6472;
+          --line:#d9dee5; --accent:#2f6fed; --high:#c0392b; --medium:#b9770e; --low:#2e7d32; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#14171a; --card:#1d2126; --fg:#e8ebef;
+          --muted:#9aa4b2; --line:#2c333b; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+         background:var(--bg); color:var(--fg); line-height:1.45; }
+  header { padding:1.2rem 1rem; border-bottom:1px solid var(--line); background:var(--card); }
+  header h1 { margin:0; font-size:1.25rem; }
+  header p { margin:.25rem 0 0; color:var(--muted); font-size:.9rem; }
+  main { max-width:1080px; margin:0 auto; padding:1rem; display:grid; gap:1rem; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:1rem; }
+  h2 { font-size:1rem; margin:0 0 .75rem; }
+  label { display:block; font-size:.82rem; color:var(--muted); margin:.6rem 0 .2rem; }
+  input, textarea { width:100%; padding:.5rem .6rem; border:1px solid var(--line); border-radius:6px;
+                    background:var(--bg); color:var(--fg); font-family:inherit; font-size:.9rem; }
+  textarea { min-height:120px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size:.8rem; }
+  button { cursor:pointer; border:1px solid var(--line); background:var(--card); color:var(--fg);
+           border-radius:6px; padding:.5rem .8rem; font-size:.9rem; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button:disabled { opacity:.5; cursor:default; }
+  .row { display:flex; gap:.5rem; flex-wrap:wrap; align-items:center; margin-top:.8rem; }
+  .muted { color:var(--muted); font-size:.85rem; }
+  .finding { border:1px solid var(--line); border-radius:8px; padding:.7rem; margin-bottom:.6rem; }
+  .finding h3 { margin:0 0 .25rem; font-size:.95rem; }
+  .badge { display:inline-block; font-size:.7rem; font-weight:700; padding:.05rem .4rem; border-radius:999px;
+           color:#fff; vertical-align:middle; margin-right:.4rem; }
+  .badge.high { background:var(--high); } .badge.medium { background:var(--medium); }
+  .badge.low { background:var(--low); }
+  .snippet { font-family: ui-monospace, Menlo, Consolas, monospace; font-size:.78rem; color:var(--muted);
+             background:var(--bg); border-radius:6px; padding:.35rem .5rem; margin-top:.35rem; overflow:auto; }
+  .finding.done h3 { text-decoration: line-through; color:var(--muted); }
+  .scan { display:flex; justify-content:space-between; gap:.5rem; padding:.45rem 0; border-bottom:1px solid var(--line); }
+  .scan:last-child { border-bottom:0; }
+  #status { min-height:1.2rem; font-size:.85rem; color:var(--muted); }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Docs Drift Detector</h1>
+  <p>Turn a release change into a prioritised, checkable list of documentation updates.</p>
+</header>
+<main>
+  <section>
+    <h2>New scan</h2>
+    <label for="name">Release name</label>
+    <input id="name" placeholder="Release 4.2">
+    <label for="changelog">Changelog or unified diff (release trigger)</label>
+    <textarea id="changelog" placeholder='renamed "Save" to "Save changes"'></textarea>
+    <label for="docs">Reference docs — separate pages with <code>===== path =====</code> lines</label>
+    <textarea id="docs" placeholder="===== help/getting-started.md =====&#10;Click Save to store your work."></textarea>
+    <label for="metrics">Page metrics JSON (optional) — {"help/x.md": {"views": 3200, "tickets": 4}}</label>
+    <textarea id="metrics" placeholder='{}'></textarea>
+    <label for="screenshots">Screenshot signals JSON (optional)</label>
+    <textarea id="screenshots" placeholder='[{"image":"img/dashboard.png","page":"help/dashboard.md","baseline_hash":"a1","current_hash":"b2"}]'></textarea>
+    <div class="row">
+      <button id="analyze" class="primary">Analyze preview</button>
+      <button id="save">Save scan</button>
+      <span id="status" role="status" aria-live="polite"></span>
+    </div>
+  </section>
+
+  <section>
+    <h2>Findings <span id="scan-title" class="muted"></span></h2>
+    <div class="row">
+      <span id="summary" class="muted"></span>
+      <a id="export" href="#" hidden>Export Markdown</a>
+    </div>
+    <div id="findings"></div>
+  </section>
+
+  <section>
+    <h2>Saved scans</h2>
+    <div id="scans" class="muted">Loading…</div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let activeScan = null;
+
+function parseDocs(text) {
+  const re = /^=====\s*(.+?)\s*=====\s*$/;
+  const pages = []; let current = null; let buf = []; let started = false;
+  const flush = () => {
+    if (started) pages.push({ path: current || "(unnamed)", content: buf.join("\n") });
+  };
+  for (const line of text.split(/\r?\n/)) {
+    const m = line.match(re);
+    if (m) { flush(); current = m[1]; buf = []; started = true; }
+    else { buf.push(line); }
+  }
+  flush();
+  return pages;
+}
+
+function parseJson(text, fallback, status) {
+  if (!text || !text.trim()) return fallback;
+  try { return JSON.parse(text); }
+  catch (e) { throw new Error("Invalid JSON in " + status + ": " + e.message); }
+}
+
+function buildPayload() {
+  return {
+    name: $("name").value.trim() || "Release scan",
+    changelog: $("changelog").value,
+    pages: parseDocs($("docs").value),
+    metrics: parseJson($("metrics").value, {}, "metrics"),
+    screenshots: parseJson($("screenshots").value, [], "screenshots"),
+  };
+}
+
+async function api(method, url, body) {
+  const opts = { method, headers: {} };
+  if (body !== undefined) { opts.headers["content-type"] = "application/json"; opts.body = JSON.stringify(body); }
+  const res = await fetch(url, opts);
+  const type = res.headers.get("content-type") || "";
+  const data = type.includes("json") ? await res.json() : await res.text();
+  if (!res.ok) throw new Error((data && data.error) || ("HTTP " + res.status));
+  return data;
+}
+
+function renderFindings(scan) {
+  activeScan = scan;
+  const box = $("findings"); box.textContent = "";
+  $("scan-title").textContent = scan.name ? "— " + scan.name : "";
+  const stats = scan.stats || {};
+  $("summary").textContent = (stats.findings || 0) + " findings · " +
+    (stats.unresolved || 0) + " open · " + (stats.high || 0) + " high";
+  if (scan.id) {
+    $("export").hidden = false;
+    $("export").href = "/api/scans/" + scan.id + "/export.md";
+  } else {
+    $("export").hidden = true;
+  }
+  const findings = scan.findings || [];
+  if (!findings.length) {
+    const p = document.createElement("p"); p.className = "muted";
+    p.textContent = "No drift detected."; box.appendChild(p); return;
+  }
+  for (const f of findings) {
+    const el = document.createElement("div");
+    el.className = "finding" + (f.resolved ? " done" : "");
+    const h = document.createElement("h3");
+    const badge = document.createElement("span");
+    badge.className = "badge " + (f.severity || "low");
+    badge.textContent = (f.severity || "").toUpperCase();
+    h.appendChild(badge); h.appendChild(document.createTextNode(f.title || ""));
+    el.appendChild(h);
+    const meta = document.createElement("div"); meta.className = "muted";
+    meta.textContent = (f.kind || "") + " · page " + (f.page || "") +
+      (f.score !== undefined ? " · score " + f.score : "");
+    el.appendChild(meta);
+    if (f.detail) { const d = document.createElement("div"); d.textContent = f.detail; el.appendChild(d); }
+    if (f.snippet) { const s = document.createElement("div"); s.className = "snippet"; s.textContent = f.snippet; el.appendChild(s); }
+    if (scan.id) {
+      const row = document.createElement("div"); row.className = "row";
+      const cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = !!f.resolved;
+      cb.id = "done-" + f.id;
+      const lbl = document.createElement("label"); lbl.htmlFor = cb.id; lbl.style.margin = "0";
+      lbl.textContent = "Resolved";
+      cb.addEventListener("change", async () => {
+        try {
+          const updated = await api("POST", "/api/scans/" + scan.id + "/findings/" + f.id + "/resolve",
+            { resolved: cb.checked });
+          renderFindings(updated); loadScans();
+        } catch (e) { $("status").textContent = e.message; cb.checked = !cb.checked; }
+      });
+      row.appendChild(cb); row.appendChild(lbl); el.appendChild(row);
+    }
+    box.appendChild(el);
+  }
+}
+
+async function run(store) {
+  $("status").textContent = "Working…";
+  try {
+    const scan = await api("POST", store ? "/api/scans" : "/api/analyze", buildPayload());
+    renderFindings(scan);
+    $("status").textContent = store ? "Saved scan " + scan.id : "Preview ready";
+    if (store) { await loadScans(); }
+  } catch (e) { $("status").textContent = e.message; }
+}
+
+async function loadScans() {
+  try {
+    const data = await api("GET", "/api/scans");
+    const box = $("scans"); box.textContent = ""; box.className = "";
+    if (!data.scans.length) { box.className = "muted"; box.textContent = "No scans yet."; return; }
+    for (const s of data.scans) {
+      const row = document.createElement("div"); row.className = "scan";
+      const info = document.createElement("span");
+      const link = document.createElement("a"); link.href = "#";
+      link.textContent = s.name || s.id;
+      link.addEventListener("click", async (ev) => {
+        ev.preventDefault();
+        renderFindings(await api("GET", "/api/scans/" + s.id));
+      });
+      info.appendChild(link);
+      const meta = document.createElement("span"); meta.className = "muted";
+      const st = s.stats || {};
+      meta.textContent = " " + (st.findings || 0) + " findings · " + (st.unresolved || 0) + " open";
+      info.appendChild(meta);
+      const del = document.createElement("button"); del.textContent = "Delete";
+      del.addEventListener("click", async () => {
+        await api("DELETE", "/api/scans/" + s.id); loadScans();
+      });
+      row.appendChild(info); row.appendChild(del);
+      box.appendChild(row);
+    }
+  } catch (e) { $("status").textContent = e.message; }
+}
+
+$("analyze").addEventListener("click", () => run(false));
+$("save").addEventListener("click", () => run(true));
+loadScans();
+</script>
+</body>
+</html>

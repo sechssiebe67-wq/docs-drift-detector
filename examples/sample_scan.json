@@ -1,0 +1,35 @@
+{
+  "name": "Release 4.2 preview",
+  "source": "release-4.2",
+  "changelog": "renamed \"Save\" to \"Save changes\"\n\"/settings\" -> \"/account/settings\"",
+  "diff": "@@ -1,2 +1,2 @@\n-<Button>Delete account</Button>\n+<Button>Delete workspace</Button>\n",
+  "labels": [
+    {"old": "Projects", "new": "Workspaces"}
+  ],
+  "routes": [
+    {"old": "/settings", "new": "/account/settings"}
+  ],
+  "pages": [
+    {
+      "path": "help/getting-started.md",
+      "content": "Click Save to store your work. Open Projects from the sidebar and visit /settings to configure your profile.\n"
+    },
+    {
+      "path": "help/dashboard.md",
+      "content": "The dashboard lists every Projects entry. You can delete your account from here.\n\n![Dashboard](img/dashboard.png)\n"
+    }
+  ],
+  "screenshots": [
+    {
+      "image": "img/dashboard.png",
+      "page": "help/dashboard.md",
+      "baseline_hash": "a1b2c3",
+      "current_hash": "d4e5f6",
+      "description": "KPI tiles were rearranged."
+    }
+  ],
+  "metrics": {
+    "help/getting-started.md": {"views": 3200, "tickets": 4},
+    "help/dashboard.md": {"views": 180, "tickets": 1}
+  }
+}

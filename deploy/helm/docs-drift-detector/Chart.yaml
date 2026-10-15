@@ -1,0 +1,13 @@
+apiVersion: v2
+name: docs-drift-detector
+description: Release-to-docs drift detection for documentation teams.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/anomalyco/docs-drift-detector
+sources:
+  - https://github.com/anomalyco/docs-drift-detector
+keywords:
+  - documentation
+  - release
+  - drift

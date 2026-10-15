@@ -1,0 +1,14 @@
+Docs Drift Detector has been deployed.
+
+1. Get the service URL:
+{{- if .Values.ingress.enabled }}
+   http{{ if .Values.ingress.tls }}s{{ end }}://{{ .Values.ingress.host }}
+{{- else }}
+   kubectl port-forward svc/{{ include "docs-drift-detector.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }} -n {{ .Release.Namespace }}
+   Then open http://localhost:{{ .Values.service.port }}
+{{- end }}
+
+2. Health probe: GET /healthz
+
+Data is stored in a persistent volume mounted at {{ .Values.persistence.mountPath }}
+(DDR_DATA_DIR).
