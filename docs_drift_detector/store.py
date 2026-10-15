@@ -20,6 +20,9 @@ from . import analyze
 
 _WORKSPACE_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
+MAX_RULE_HISTORY = 20
+_RULE_HISTORY_ACTIONS = ("set", "import", "clear", "promote")
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -29,12 +32,39 @@ def _valid_workspace(workspace: Any) -> bool:
     return bool(_WORKSPACE_RE.match(str(workspace or "")))
 
 
+def _normalise_history_entry(entry: Any) -> Optional[Dict[str, Any]]:
+    """Validate a persisted history entry, returning None when malformed."""
+    if not isinstance(entry, dict):
+        return None
+    revision = entry.get("revision")
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+        return None
+    action = entry.get("action")
+    if action not in _RULE_HISTORY_ACTIONS:
+        action = "set"
+    created_at = entry.get("created_at")
+    if not isinstance(created_at, str):
+        created_at = ""
+    rules = analyze._normalise_rules(entry.get("rules"), origin="workspace")
+    rule_count = entry.get("rule_count")
+    if not isinstance(rule_count, int) or isinstance(rule_count, bool) or rule_count < 0:
+        rule_count = len(rules)
+    return {
+        "revision": revision,
+        "created_at": created_at,
+        "action": action,
+        "rule_count": rule_count,
+        "rules": rules,
+    }
+
+
 class Store:
     def __init__(self, path: str):
         self.path = path
         self._lock = threading.RLock()
         self._scans: Dict[str, Dict[str, Any]] = {}
         self._workspace_rules: Dict[str, List[Dict[str, str]]] = {}
+        self._workspace_rule_history: Dict[str, List[Dict[str, Any]]] = {}
         self._load()
 
     def _load(self) -> None:
@@ -58,6 +88,22 @@ class Store:
                     continue
                 loaded[workspace] = analyze._normalise_rules(rules, origin="workspace")
             self._workspace_rules = loaded
+        history = data.get("workspace_rule_history")
+        if isinstance(history, dict):
+            loaded_history: Dict[str, List[Dict[str, Any]]] = {}
+            for workspace, revisions in history.items():
+                if not isinstance(workspace, str) or not _valid_workspace(workspace):
+                    continue
+                if not isinstance(revisions, list):
+                    continue
+                entries = []
+                for entry in revisions:
+                    normalised = _normalise_history_entry(entry)
+                    if normalised is not None:
+                        entries.append(normalised)
+                entries.sort(key=lambda item: item["revision"])
+                loaded_history[workspace] = entries
+            self._workspace_rule_history = loaded_history
 
     def _persist(self) -> None:
         directory = os.path.dirname(os.path.abspath(self.path))
@@ -66,7 +112,11 @@ class Store:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(
-                    {"scans": self._scans, "workspace_rules": self._workspace_rules},
+                    {
+                        "scans": self._scans,
+                        "workspace_rules": self._workspace_rules,
+                        "workspace_rule_history": self._workspace_rule_history,
+                    },
                     handle,
                     ensure_ascii=False,
                     indent=2,
@@ -91,11 +141,32 @@ class Store:
             rules = self._workspace_rules.get(name, [])
             return copy.deepcopy(rules)
 
-    def set_workspace_rules(self, workspace: str, rules: Any) -> List[Dict[str, str]]:
+    def _record_history(
+        self, name: str, action: str, rules: List[Dict[str, str]]
+    ) -> Dict[str, Any]:
+        """Append a revision for ``name`` and trim history to the cap."""
+        entries = self._workspace_rule_history.setdefault(name, [])
+        revision = entries[-1]["revision"] + 1 if entries else 1
+        entry = {
+            "revision": revision,
+            "created_at": _utc_now(),
+            "action": action if action in _RULE_HISTORY_ACTIONS else "set",
+            "rule_count": len(rules),
+            "rules": copy.deepcopy(rules),
+        }
+        entries.append(entry)
+        if len(entries) > MAX_RULE_HISTORY:
+            del entries[: len(entries) - MAX_RULE_HISTORY]
+        return entry
+
+    def set_workspace_rules(
+        self, workspace: str, rules: Any, action: str = "set"
+    ) -> List[Dict[str, str]]:
         name = self._check_workspace(workspace)
         normalised = analyze._normalise_rules(rules, origin="workspace")
         with self._lock:
             self._workspace_rules[name] = normalised
+            self._record_history(name, action, normalised)
             self._persist()
             return copy.deepcopy(normalised)
 
@@ -103,10 +174,35 @@ class Store:
         name = self._check_workspace(workspace)
         with self._lock:
             existed = name in self._workspace_rules
-            if existed:
-                del self._workspace_rules[name]
-                self._persist()
+            self._workspace_rules.pop(name, None)
+            self._record_history(name, "clear", [])
+            self._persist()
             return existed
+
+    def list_workspace_rule_history(self, workspace: str) -> List[Dict[str, Any]]:
+        name = self._check_workspace(workspace)
+        with self._lock:
+            entries = self._workspace_rule_history.get(name, [])
+            newest_first = sorted(
+                entries, key=lambda item: item["revision"], reverse=True
+            )
+            return copy.deepcopy(newest_first)
+
+    def promote_workspace_rule_revision(
+        self, workspace: str, revision: int
+    ) -> Optional[List[Dict[str, str]]]:
+        name = self._check_workspace(workspace)
+        with self._lock:
+            for entry in self._workspace_rule_history.get(name, []):
+                if entry["revision"] == revision:
+                    normalised = analyze._normalise_rules(
+                        entry["rules"], origin="workspace"
+                    )
+                    self._workspace_rules[name] = normalised
+                    self._record_history(name, "promote", normalised)
+                    self._persist()
+                    return copy.deepcopy(normalised)
+            return None
 
     def create_scan(
         self,

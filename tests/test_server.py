@@ -409,5 +409,76 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(fetched["stats"]["suppressed_rules"], breakdown)
 
 
+    def test_rules_history_fresh_workspace_is_empty(self):
+        status, payload = self._json("GET", "/api/workspaces/wsHistFresh/rules/history")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {"workspace": "wsHistFresh", "history": []})
+
+    def test_rules_history_invalid_workspace_returns_400(self):
+        status, _ = self._json("GET", "/api/workspaces/bad%20id!/rules/history")
+        self.assertEqual(status, 400)
+
+    def test_rules_history_records_actions(self):
+        ws = "wsHistActions"
+        self._json("PUT", "/api/workspaces/%s/rules" % ws, {"rules": [{"value": "Save"}]})
+        self._json("POST", "/api/workspaces/%s/rules/import" % ws, {"rules": [{"value": "New"}]})
+        self._json("DELETE", "/api/workspaces/%s/rules" % ws)
+        status, payload = self._json("GET", "/api/workspaces/%s/rules/history" % ws)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["workspace"], ws)
+        actions = [entry["action"] for entry in payload["history"]]
+        self.assertEqual(actions, ["clear", "import", "set"])
+        revisions = [entry["revision"] for entry in payload["history"]]
+        self.assertEqual(revisions, [3, 2, 1])
+        for entry in payload["history"]:
+            self.assertIsInstance(entry["revision"], int)
+            self.assertIsInstance(entry["created_at"], str)
+            self.assertIsInstance(entry["rule_count"], int)
+            self.assertIsInstance(entry["rules"], list)
+        self.assertEqual(payload["history"][0]["rule_count"], 0)
+
+    def test_rules_promote_restores_revision(self):
+        ws = "wsPromote"
+        status, first = self._json(
+            "PUT", "/api/workspaces/%s/rules" % ws, {"rules": [{"value": "Old"}]}
+        )
+        self.assertEqual(status, 200)
+        self._json("PUT", "/api/workspaces/%s/rules" % ws, {"rules": [{"value": "New"}]})
+
+        status, payload = self._json(
+            "POST", "/api/workspaces/%s/rules/history/1/promote" % ws
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["promoted"], 1)
+        self.assertEqual([r["value"] for r in payload["rules"]], ["Old"])
+        self.assertEqual(payload["rules"], first["rules"])
+
+        status, stored = self._json("GET", "/api/workspaces/%s/rules" % ws)
+        self.assertEqual(status, 200)
+        self.assertEqual([r["value"] for r in stored["rules"]], ["Old"])
+
+        status, history = self._json("GET", "/api/workspaces/%s/rules/history" % ws)
+        self.assertEqual(history["history"][0]["action"], "promote")
+
+    def test_rules_promote_unknown_revision_returns_404(self):
+        ws = "wsPromoteMissing"
+        self._json("PUT", "/api/workspaces/%s/rules" % ws, {"rules": [{"value": "Save"}]})
+        status, payload = self._json(
+            "POST", "/api/workspaces/%s/rules/history/999/promote" % ws
+        )
+        self.assertEqual(status, 404)
+        self.assertIn("error", payload)
+
+    def test_rules_promote_invalid_inputs_return_400(self):
+        status, _ = self._json(
+            "POST", "/api/workspaces/bad%20id!/rules/history/1/promote"
+        )
+        self.assertEqual(status, 400)
+        status, _ = self._json(
+            "POST", "/api/workspaces/wsBadRev/rules/history/notanint/promote"
+        )
+        self.assertEqual(status, 400)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -92,10 +92,12 @@
       <button id="ws-clear">Clear library</button>
       <button id="ws-export">Export JSON</button>
       <button id="ws-import">Import JSON</button>
+      <button id="ws-history">Load history</button>
       <input id="ws-import-file" type="file" accept="application/json,.json" hidden aria-hidden="true">
       <span id="ws-status" class="muted" role="status" aria-live="polite"></span>
     </div>
-    <p class="muted">Export downloads a portable rule library document; import replaces the stored library from such a document.</p>
+    <p class="muted">Export downloads a portable rule library document; import replaces the stored library from such a document. Load history lists recent revisions (newest first) and lets you promote one back into the live library.</p>
+    <div id="ws-history-list"></div>
   </section>
 
   <section>
@@ -369,6 +371,67 @@ async function importWorkspaceRules(file) {
   } catch (e) { $("ws-status").textContent = e.message; }
 }
 
+async function loadWorkspaceHistory() {
+  const ws = $("ws-name").value.trim();
+  if (!ws) { $("ws-status").textContent = "Enter a workspace name."; return; }
+  const box = $("ws-history-list");
+  box.textContent = "";
+  try {
+    const data = await api("GET", "/api/workspaces/" + encodeURIComponent(ws) + "/rules/history");
+    const history = data.history || [];
+    if (!history.length) {
+      const p = document.createElement("p"); p.className = "muted";
+      p.textContent = "No rule-library history yet."; box.appendChild(p);
+      $("ws-status").textContent = "History is empty for " + ws + ".";
+      return;
+    }
+    const table = document.createElement("table");
+    table.className = "provenance";
+    const thead = document.createElement("thead");
+    const headRow = document.createElement("tr");
+    for (const label of ["Revision", "Action", "Rules", "Created", ""]) {
+      const th = document.createElement("th"); th.textContent = label; headRow.appendChild(th);
+    }
+    thead.appendChild(headRow); table.appendChild(thead);
+    const tbody = document.createElement("tbody");
+    for (const entry of history) {
+      const tr = document.createElement("tr");
+      for (const value of [entry.revision, entry.action, entry.rule_count, entry.created_at || "—"]) {
+        const td = document.createElement("td");
+        td.textContent = String(value === undefined || value === null ? "" : value);
+        tr.appendChild(td);
+      }
+      const actionCell = document.createElement("td");
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = "Promote";
+      btn.setAttribute("aria-label", "Promote revision " + entry.revision);
+      btn.addEventListener("click", () => promoteWorkspaceRevision(entry.revision));
+      actionCell.appendChild(btn);
+      tr.appendChild(actionCell);
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    box.appendChild(table);
+    $("ws-status").textContent = "Loaded " + history.length + " revision(s) for " + ws + ".";
+  } catch (e) { $("ws-status").textContent = e.message; }
+}
+
+async function promoteWorkspaceRevision(revision) {
+  const ws = $("ws-name").value.trim();
+  if (!ws) { $("ws-status").textContent = "Enter a workspace name."; return; }
+  try {
+    const data = await api(
+      "POST",
+      "/api/workspaces/" + encodeURIComponent(ws) + "/rules/history/" + revision + "/promote"
+    );
+    $("ws-rules").value = JSON.stringify(data.rules || [], null, 2);
+    $("ws-status").textContent =
+      "Promoted revision " + data.promoted + " for " + ws + " (" + (data.rules || []).length + " rule(s)).";
+    await loadWorkspaceHistory();
+  } catch (e) { $("ws-status").textContent = e.message; }
+}
+
 function syncWorkspaceNote() {
   $("workspace-note").hidden = !$("workspace").value.trim();
 }
@@ -382,6 +445,7 @@ $("ws-load").addEventListener("click", loadWorkspaceRules);
 $("ws-save").addEventListener("click", saveWorkspaceRules);
 $("ws-clear").addEventListener("click", clearWorkspaceRules);
 $("ws-export").addEventListener("click", exportWorkspaceRules);
+$("ws-history").addEventListener("click", loadWorkspaceHistory);
 $("ws-import").addEventListener("click", () => $("ws-import-file").click());
 $("ws-import-file").addEventListener("change", () => {
   const file = $("ws-import-file").files[0];

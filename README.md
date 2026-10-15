@@ -31,6 +31,8 @@ Open <http://localhost:8080>. The service exposes:
 - `DELETE /api/workspaces/{ws}/rules` — clear the library.
 - `GET  /api/workspaces/{ws}/rules/export` — download the library as a portable JSON document.
 - `POST /api/workspaces/{ws}/rules/import` — replace the library from an exported document.
+- `GET  /api/workspaces/{ws}/rules/history` — list recent library revisions, newest first.
+- `POST /api/workspaces/{ws}/rules/history/{revision}/promote` — restore a revision as the live library.
 
 ### Scan request body
 
@@ -126,6 +128,43 @@ normalises it, replaces the stored library and returns
 `{"rules": [...], "imported": n}` where `imported` is the number of stored
 rules. A body without a usable `rules` list returns HTTP 400, as does an invalid
 workspace id. `examples/sample_workspace_rules.json` is an example document.
+
+#### Rule-library history and promotion
+
+Every successful `PUT /api/workspaces/{ws}/rules`,
+`POST /api/workspaces/{ws}/rules/import` and `DELETE /api/workspaces/{ws}/rules`
+appends a revision to an append-only history for that workspace. History is
+capped at `MAX_RULE_HISTORY` (20) revisions per workspace; once the cap is
+reached the oldest revision is dropped. Revisions share the same JSON store as
+scans, so no database or extra dependency is required.
+
+```sh
+curl -sS localhost:8080/api/workspaces/ws1/rules/history | python3 -m json.tool
+
+curl -sS -X POST localhost:8080/api/workspaces/ws1/rules/history/1/promote \
+  | python3 -m json.tool
+```
+
+`GET .../rules/history` returns HTTP 200 with
+`{"workspace": "ws1", "history": [...]}`, newest revision first. Each entry has:
+
+```json
+{
+  "revision": 3,
+  "created_at": "2024-01-01T12:00:00+00:00",
+  "action": "set",
+  "rule_count": 1,
+  "rules": [
+    {"kind": "label", "page": "", "value": "Save", "reason": "", "id": "ab12cd34ef56", "origin": "workspace"}
+  ]
+}
+```
+
+`action` is one of `set` (PUT), `import` (import), `clear` (DELETE) or `promote`.
+`POST .../rules/history/{revision}/promote` restores the rules of that revision as
+the current library, records a new `promote` revision and returns HTTP 200 with
+`{"rules": [...], "promoted": revision}`. An unknown revision returns HTTP 404,
+and an invalid workspace id or non-integer revision returns HTTP 400.
 
 ### Example
 
