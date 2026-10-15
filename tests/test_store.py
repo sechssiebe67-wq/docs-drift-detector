@@ -100,6 +100,51 @@ class StoreTest(unittest.TestCase):
         reopened = Store(self.path)
         self.assertEqual(reopened.list_workspace_rules("ws1")[0]["value"], "Save")
 
+    def test_workspace_rules_persist_id_and_origin_metadata(self):
+        saved = self.store.set_workspace_rules("ws1", [{"kind": "label", "value": "Save"}])
+        self.assertEqual(saved[0]["origin"], "workspace")
+        self.assertTrue(saved[0]["id"])
+        with open(self.path, "r", encoding="utf-8") as handle:
+            raw = handle.read()
+        self.assertIn('"id"', raw)
+        self.assertIn('"origin"', raw)
+        reopened = Store(self.path)
+        loaded = reopened.list_workspace_rules("ws1")[0]
+        self.assertEqual(loaded["origin"], "workspace")
+        self.assertEqual(loaded["id"], saved[0]["id"])
+
+    def test_legacy_workspace_rules_without_metadata_are_regenerated(self):
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write(
+                '{"scans": {}, "workspace_rules": {"ws1": [{"kind": "label", "value": "Save"}]}}'
+            )
+        reopened = Store(self.path)
+        rule = reopened.list_workspace_rules("ws1")[0]
+        self.assertEqual(rule["origin"], "workspace")
+        self.assertTrue(rule["id"])
+
+    def test_create_scan_persists_suppressed_rules(self):
+        breakdown = [
+            {"id": "abc123", "origin": "workspace", "kind": "label", "page": "", "value": "Save", "count": 2}
+        ]
+        scan = self.store.create_scan(
+            "R1", "release", [_finding()], suppressed=2, suppressed_rules=breakdown
+        )
+        self.assertEqual(scan["stats"]["suppressed"], 2)
+        self.assertEqual(scan["stats"]["suppressed_rules"], breakdown)
+        reopened = Store(self.path)
+        self.assertEqual(reopened.get_scan(scan["id"])["stats"]["suppressed_rules"], breakdown)
+
+    def test_resolve_finding_keeps_suppressed_rules(self):
+        breakdown = [
+            {"id": "abc123", "origin": "workspace", "kind": "label", "page": "", "value": "Save", "count": 2}
+        ]
+        scan = self.store.create_scan(
+            "R1", "release", [_finding()], suppressed=2, suppressed_rules=breakdown
+        )
+        updated = self.store.resolve_finding(scan["id"], "abc", True)
+        self.assertEqual(updated["stats"]["suppressed_rules"], breakdown)
+
     def test_workspace_rules_malformed_input_tolerated(self):
         saved = self.store.set_workspace_rules(
             "ws1",

@@ -162,10 +162,78 @@ class DetectDriftTest(unittest.TestCase):
         self.assertEqual(findings, [])
         self.assertEqual(report["suppressed"], 1)
 
+    def test_suppressed_rules_breakdown_records_provenance(self):
+        changes = {
+            "labels": [{"old": "Save", "new": "Save changes"}],
+            "routes": [{"old": "/settings", "new": "/account/settings"}],
+        }
+        report = {}
+        rules = analyze._normalise_rules(
+            [{"kind": "label", "value": "Save"}], origin="workspace"
+        ) + analyze._normalise_rules(
+            [{"kind": "route", "value": "/settings"}], origin="request"
+        )
+        findings = analyze.detect_drift(changes, pages=self._pages(), rules=rules, stats=report)
+        self.assertEqual(findings, [])
+        self.assertEqual(report["suppressed"], 2)
+        breakdown = report["suppressed_rules"]
+        self.assertEqual(len(breakdown), 2)
+        by_origin = {entry["origin"]: entry for entry in breakdown}
+        self.assertEqual(by_origin["workspace"]["kind"], "label")
+        self.assertEqual(by_origin["workspace"]["value"], "Save")
+        self.assertEqual(by_origin["workspace"]["count"], 1)
+        self.assertEqual(by_origin["request"]["kind"], "route")
+        self.assertEqual(by_origin["request"]["value"], "/settings")
+        self.assertEqual(by_origin["request"]["count"], 1)
+        for entry in breakdown:
+            self.assertEqual(
+                set(entry), {"id", "origin", "kind", "page", "value", "count"}
+            )
+
+    def test_suppressed_rules_aggregates_and_sorts(self):
+        changes = {
+            "labels": [
+                {"old": "Save", "new": "Save changes"},
+                {"old": "Projects", "new": "Workspaces"},
+            ],
+            "routes": [],
+        }
+        pages = [
+            {"path": "help/a.md", "content": "Save here."},
+            {"path": "help/b.md", "content": "Save there."},
+            {"path": "help/c.md", "content": "Projects list."},
+        ]
+        report = {}
+        rules = analyze._normalise_rules(
+            [
+                {"kind": "label", "value": "Save"},
+                {"kind": "label", "value": "Projects"},
+            ]
+        )
+        analyze.detect_drift(changes, pages=pages, rules=rules, stats=report)
+        breakdown = report["suppressed_rules"]
+        self.assertEqual([entry["count"] for entry in breakdown], [2, 1])
+        self.assertEqual(breakdown[0]["value"], "Save")
+        self.assertEqual(breakdown[0]["count"], 2)
+        self.assertEqual(report["suppressed"], 3)
+
+    def test_detect_drift_without_stats_does_not_raise(self):
+        changes = {"labels": [{"old": "Save", "new": "Save changes"}], "routes": []}
+        findings = analyze.detect_drift(
+            changes, pages=self._pages(), rules=[{"kind": "label", "value": "Save"}]
+        )
+        self.assertEqual(findings, [])
+
     def test_summarise_reports_suppressed(self):
         self.assertEqual(analyze.summarise([])["suppressed"], 0)
         self.assertEqual(analyze.summarise([], suppressed=3)["suppressed"], 3)
         self.assertEqual(analyze.summarise([], suppressed="bad")["suppressed"], 0)
+        self.assertEqual(analyze.summarise([])["suppressed_rules"], [])
+        rules = [{"id": "x", "origin": "request", "kind": "label", "page": "", "value": "S", "count": 2}]
+        self.assertEqual(analyze.summarise([], suppressed_rules=rules)["suppressed_rules"], rules)
+
+    def test_summarise_ignores_non_list_suppressed_rules(self):
+        self.assertEqual(analyze.summarise([], suppressed_rules="bad")["suppressed_rules"], [])
 
     def test_normalise_rules_accepts_store_shapes(self):
         rules = analyze._normalise_rules(
@@ -178,7 +246,38 @@ class DetectDriftTest(unittest.TestCase):
         self.assertEqual([r["value"] for r in rules], ["Save", "Projects", "Bare string"])
         self.assertEqual(rules[0]["kind"], "label")
         self.assertEqual(rules[1]["kind"], "*")
-        self.assertEqual(rules[2], {"kind": "*", "page": "", "value": "Bare string", "reason": ""})
+        self.assertEqual(
+            {k: rules[2][k] for k in ("kind", "page", "value", "reason")},
+            {"kind": "*", "page": "", "value": "Bare string", "reason": ""},
+        )
+        for rule in rules:
+            self.assertTrue(rule["id"])
+            self.assertEqual(rule["origin"], "request")
+
+    def test_normalise_rules_tags_id_and_origin(self):
+        rules = analyze._normalise_rules(
+            [{"kind": "label", "page": "help/*.md", "value": "Save"}], origin="workspace"
+        )
+        self.assertEqual(len(rules), 1)
+        rule = rules[0]
+        self.assertEqual(rule["origin"], "workspace")
+        self.assertEqual(rule["id"], analyze._rule_id("label", "help/*.md", "Save"))
+        self.assertEqual(len(rule["id"]), 12)
+
+    def test_rule_id_is_stable_and_content_sensitive(self):
+        a = analyze._normalise_rules([{"kind": "label", "value": "Save"}])[0]["id"]
+        b = analyze._normalise_rules([{"kind": "label", "value": "Save"}])[0]["id"]
+        c = analyze._normalise_rules([{"kind": "label", "value": "Store"}])[0]["id"]
+        self.assertEqual(a, b)
+        self.assertNotEqual(a, c)
+
+    def test_normalise_rules_preserves_existing_origin(self):
+        rules = analyze._normalise_rules([{"kind": "label", "value": "Save", "origin": "workspace"}])
+        self.assertEqual(rules[0]["origin"], "workspace")
+        forced = analyze._normalise_rules(
+            [{"kind": "label", "value": "Save", "origin": "workspace"}], origin="request"
+        )
+        self.assertEqual(forced[0]["origin"], "request")
 
     def test_normalise_rules_accepts_bare_dict(self):
         rules = analyze._normalise_rules({"kind": "route", "value": "/settings"})

@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "workspace": "ws1",
+  "rules": [
+    {
+      "kind": "label",
+      "page": "help/getting-started.md",
+      "value": "Save",
+      "reason": "The label is quoted intentionally as an example in the guide.",
+      "id": "4d1874536a10",
+      "origin": "workspace"
+    },
+    {
+      "kind": "label",
+      "page": "help/*.md",
+      "value": "Projects",
+      "reason": "Legacy term kept in archived help pages.",
+      "id": "ee7f4b8b8d19",
+      "origin": "workspace"
+    }
+  ]
+}

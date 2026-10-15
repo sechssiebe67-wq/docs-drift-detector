@@ -29,6 +29,8 @@ Open <http://localhost:8080>. The service exposes:
 - `GET  /api/workspaces/{ws}/rules` — read the stored rule library (`[]` when unset).
 - `PUT  /api/workspaces/{ws}/rules` — replace the library with `{"rules": [...]}`.
 - `DELETE /api/workspaces/{ws}/rules` — clear the library.
+- `GET  /api/workspaces/{ws}/rules/export` — download the library as a portable JSON document.
+- `POST /api/workspaces/{ws}/rules/import` — replace the library from an exported document.
 
 ### Scan request body
 
@@ -63,6 +65,14 @@ matched against the finding's old value (or screenshot image path). Matched
 findings are excluded from scoring and export, and their count is reported as
 `stats.suppressed`. Malformed rules are ignored silently.
 
+Every normalised rule carries a stable `id` (a short hash of `kind|page|value`)
+and an `origin` (`request` for inline rules, `workspace` for library rules).
+Alongside the backwards-compatible integer `stats.suppressed` total, the summary
+reports `stats.suppressed_rules`: a list of
+`{"id", "origin", "kind", "page", "value", "count"}` entries, one per matching
+rule, sorted by descending `count` then `id`. This makes it possible to audit
+*why* each finding was suppressed and which rule (and library) did it.
+
 ### Workspace rule libraries
 
 `workspace` is an optional name (`[A-Za-z0-9_-]{1,64}`) recorded on a scan.
@@ -71,7 +81,8 @@ being pasted into every request. When a scan/create or analyze request carries a
 `workspace`, the stored library rules are merged with the request `rules`: the
 per-scan `rules` take precedence and **both** sets are applied, so the combined
 suppressions are reflected in `stats.suppressed`. Requests without a `workspace`
-behave exactly as before.
+behave exactly as before. Suppressions from inline rules are tagged
+`origin=request`; those from the stored library are tagged `origin=workspace`.
 
 ```sh
 curl -sS -X PUT localhost:8080/api/workspaces/ws1/rules \
@@ -79,9 +90,42 @@ curl -sS -X PUT localhost:8080/api/workspaces/ws1/rules \
   --data '{"rules":[{"kind":"label","value":"Save"}]}' | python3 -m json.tool
 ```
 
-Invalid workspace ids (for example `bad id!`) return HTTP 400 on all three
-workspace endpoints. The same name restriction applies when a scan or analyze
-request carries a `workspace`.
+Invalid workspace ids (for example `bad id!`) return HTTP 400 on all workspace
+endpoints. The same name restriction applies when a scan or analyze request
+carries a `workspace`.
+
+#### Portable rule-library import/export
+
+A workspace library can be moved between environments (staging → production) or
+between workspaces as a single JSON document:
+
+```sh
+curl -sS localhost:8080/api/workspaces/ws1/rules/export \
+  -o workspace-ws1-rules.json
+
+curl -sS -X POST localhost:8080/api/workspaces/ws2/rules/import \
+  -H 'content-type: application/json' \
+  --data @workspace-ws1-rules.json | python3 -m json.tool
+```
+
+`GET .../rules/export` returns HTTP 200 with `Content-Type: application/json`, a
+`Content-Disposition` attachment filename and this document shape:
+
+```json
+{
+  "version": 1,
+  "workspace": "ws1",
+  "rules": [
+    {"kind": "label", "page": "help/*.md", "value": "Save", "reason": "example", "id": "ab12cd34ef56", "origin": "workspace"}
+  ]
+}
+```
+
+`POST .../rules/import` accepts that document (or a bare `{"rules": [...]}`),
+normalises it, replaces the stored library and returns
+`{"rules": [...], "imported": n}` where `imported` is the number of stored
+rules. A body without a usable `rules` list returns HTTP 400, as does an invalid
+workspace id. `examples/sample_workspace_rules.json` is an example document.
 
 ### Example
 
