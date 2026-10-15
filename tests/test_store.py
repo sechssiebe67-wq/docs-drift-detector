@@ -5,7 +5,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from docs_drift_detector.store import Store  # noqa: E402
+from docs_drift_detector.store import MAX_RULE_HISTORY, Store  # noqa: E402
 
 
 def _finding(fid="abc", severity="high"):
@@ -170,6 +170,76 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(reopened.list_workspace_rules("ws1"), [])
         reopened.set_workspace_rules("ws1", ["Save"])
         self.assertEqual(reopened.list_workspace_rules("ws1")[0]["value"], "Save")
+
+    def test_workspace_rule_history_newest_first(self):
+        self.store.set_workspace_rules("ws1", [{"kind": "label", "value": "Save"}])
+        self.store.set_workspace_rules(
+            "ws1", [{"kind": "label", "value": "Save"}, {"kind": "route", "value": "/a"}]
+        )
+        history = self.store.list_workspace_rule_history("ws1")
+        self.assertEqual([entry["revision"] for entry in history], [2, 1])
+        self.assertEqual([entry["action"] for entry in history], ["set", "set"])
+        self.assertEqual([entry["rule_count"] for entry in history], [2, 1])
+        self.assertIsInstance(history[0]["created_at"], str)
+        self.assertEqual(history[0]["rules"][1]["value"], "/a")
+
+    def test_workspace_rule_history_records_import_and_clear(self):
+        self.store.set_workspace_rules("ws1", [], action="import")
+        self.store.delete_workspace_rules("ws1")
+        history = self.store.list_workspace_rule_history("ws1")
+        self.assertEqual([entry["action"] for entry in history], ["clear", "import"])
+
+    def test_workspace_rule_history_capped(self):
+        for index in range(MAX_RULE_HISTORY + 5):
+            self.store.set_workspace_rules("ws1", [{"value": "v%d" % index}])
+        history = self.store.list_workspace_rule_history("ws1")
+        self.assertEqual(len(history), MAX_RULE_HISTORY)
+        self.assertEqual(history[0]["revision"], MAX_RULE_HISTORY + 5)
+        self.assertEqual(history[-1]["revision"], 6)
+        self.assertEqual(history[0]["rules"][0]["value"], "v%d" % (MAX_RULE_HISTORY + 4))
+
+    def test_workspace_rule_promote_restores_and_records(self):
+        self.store.set_workspace_rules("ws1", [{"kind": "label", "value": "Old"}])
+        self.store.set_workspace_rules("ws1", [{"kind": "label", "value": "New"}])
+        restored = self.store.promote_workspace_rule_revision("ws1", 1)
+        self.assertEqual([rule["value"] for rule in restored], ["Old"])
+        self.assertEqual(self.store.list_workspace_rules("ws1"), restored)
+        history = self.store.list_workspace_rule_history("ws1")
+        self.assertEqual(history[0]["action"], "promote")
+        self.assertEqual(history[0]["rule_count"], 1)
+        self.assertEqual(history[0]["rules"], restored)
+
+    def test_workspace_rule_promote_unknown_returns_none(self):
+        self.store.set_workspace_rules("ws1", [{"value": "Save"}])
+        self.assertIsNone(self.store.promote_workspace_rule_revision("ws1", 999))
+        self.assertEqual([rule["value"] for rule in self.store.list_workspace_rules("ws1")], ["Save"])
+
+    def test_workspace_rule_history_persists(self):
+        self.store.set_workspace_rules("ws1", [{"kind": "label", "value": "Save"}])
+        reopened = Store(self.path)
+        history = reopened.list_workspace_rule_history("ws1")
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["revision"], 1)
+
+    def test_old_store_without_history_key_loads_empty(self):
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write('{"scans": {}, "workspace_rules": {"ws1": [{"value": "Save"}]}}')
+        reopened = Store(self.path)
+        self.assertEqual(reopened.list_workspace_rule_history("ws1"), [])
+        reopened.set_workspace_rules("ws1", [{"value": "Save"}])
+        self.assertEqual(reopened.list_workspace_rule_history("ws1")[0]["revision"], 1)
+
+    def test_workspace_rule_history_ignores_malformed_entries(self):
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write(
+                '{"scans": {}, "workspace_rule_history": {"ws1": '
+                '[{"revision": "x"}, 5, {"action": "clear"}, '
+                '{"revision": 2, "action": "set", "rules": [{"value": "Keep"}]}]}}'
+            )
+        reopened = Store(self.path)
+        history = reopened.list_workspace_rule_history("ws1")
+        self.assertEqual([entry["revision"] for entry in history], [2])
+        self.assertEqual(history[0]["rules"][0]["value"], "Keep")
 
     @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root bypasses filesystem permissions")
     def test_create_scan_survives_write_failure(self):

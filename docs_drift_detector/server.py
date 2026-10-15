@@ -132,6 +132,16 @@ class Handler(BaseHTTPRequestHandler):
             if self.command != "HEAD":
                 self.wfile.write(body)
             return
+        if (
+            len(parts) == 5
+            and parts[:2] == ["api", "workspaces"]
+            and parts[3] == "rules"
+            and parts[4] == "history"
+        ):
+            if not _valid_id(parts[2]):
+                return self._error(400, "invalid workspace id")
+            history = self.server.store.list_workspace_rule_history(parts[2])
+            return self._json(200, {"workspace": parts[2], "history": history})
         if parts == ["api", "scans"]:
             return self._json(200, {"scans": self.server.store.list_scans()})
         if len(parts) == 3 and parts[:2] == ["api", "scans"] and _valid_id(parts[2]):
@@ -164,6 +174,27 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
         parts = _split(path)
+
+        if (
+            len(parts) == 7
+            and parts[:2] == ["api", "workspaces"]
+            and parts[3] == "rules"
+            and parts[4] == "history"
+            and parts[6] == "promote"
+        ):
+            if not _valid_id(parts[2]):
+                return self._error(400, "invalid workspace id")
+            try:
+                revision = int(parts[5])
+            except (TypeError, ValueError):
+                return self._error(400, "invalid revision")
+            if revision < 1:
+                return self._error(400, "invalid revision")
+            restored = self.server.store.promote_workspace_rule_revision(parts[2], revision)
+            if restored is None:
+                return self._error(404, "revision not found")
+            return self._json(200, {"rules": restored, "promoted": revision})
+
         data = self._read_json()
         if data is None:
             return self._error(400, "invalid or missing JSON body")
@@ -183,7 +214,7 @@ class Handler(BaseHTTPRequestHandler):
             rules = data.get("rules")
             if not isinstance(rules, list):
                 return self._error(400, "invalid rules document")
-            stored = self.server.store.set_workspace_rules(parts[2], rules)
+            stored = self.server.store.set_workspace_rules(parts[2], rules, action="import")
             return self._json(200, {"rules": stored, "imported": len(stored)})
         if (
             len(parts) == 6

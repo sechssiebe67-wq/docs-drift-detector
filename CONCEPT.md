@@ -71,6 +71,16 @@ manual review marathon.
   so a curated rule set can move from staging to production or between
   workspaces. Import replaces the stored library and reports how many rules were
   imported; malformed documents are rejected with HTTP 400.
+- **Versioned rule-library history and promotion.** Every library mutation
+  (`PUT`/`import`/`clear`) appends a revision to a bounded, append-only history
+  (up to `MAX_RULE_HISTORY = 20` revisions per workspace, oldest dropped) stored
+  with the scans in the same JSON file. `GET /api/workspaces/{ws}/rules/history`
+  lists revisions newest-first with `revision`, `created_at`, `action`
+  (`set`/`import`/`clear`/`promote`), `rule_count` and the normalised `rules`;
+  `POST /api/workspaces/{ws}/rules/history/{revision}/promote` restores that
+  revision as the live library (recording a new `promote` revision) so a bad
+  import can be undone and a curated staging rule set promoted to production in
+  one call.
 - **Rule provenance in the suppressed summary.** Every normalised rule carries a
   stable `id` (a short hash of `kind|page|value`) and an `origin`
   (`request` or `workspace`). The scan summary keeps the integer
@@ -93,8 +103,8 @@ release-to-docs comparison with text and screenshot matching.
 - Screenshot diffing with per-region highlighting instead of change signals.
 - Pluggable connectors for GitHub commit ranges and rendered docs sites.
 - Per-workspace repositories and doc-page quotas for the tiered SaaS plan.
-- Rule-library history and one-click promotion between environments, building on
-  the export document and the per-rule provenance now captured in every scan.
+- Scheduled drift scans with digest notifications, building on the export
+  document and the per-rule provenance now captured in every scan.
 
 ## Non-goals and known limits
 
