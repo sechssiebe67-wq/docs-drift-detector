@@ -39,6 +39,9 @@
   .finding.done h3 { text-decoration: line-through; color:var(--muted); }
   .scan { display:flex; justify-content:space-between; gap:.5rem; padding:.45rem 0; border-bottom:1px solid var(--line); }
   .scan:last-child { border-bottom:0; }
+  table.provenance { width:100%; border-collapse:collapse; margin-top:.4rem; font-size:.82rem; }
+  table.provenance th, table.provenance td { text-align:left; padding:.3rem .5rem; border-bottom:1px solid var(--line); }
+  table.provenance th { color:var(--muted); font-weight:600; }
   #status { min-height:1.2rem; font-size:.85rem; color:var(--muted); }
   a { color:var(--accent); }
 </style>
@@ -87,8 +90,12 @@
       <button id="ws-load">Load</button>
       <button id="ws-save" class="primary">Save library</button>
       <button id="ws-clear">Clear library</button>
+      <button id="ws-export">Export JSON</button>
+      <button id="ws-import">Import JSON</button>
+      <input id="ws-import-file" type="file" accept="application/json,.json" hidden aria-hidden="true">
       <span id="ws-status" class="muted" role="status" aria-live="polite"></span>
     </div>
+    <p class="muted">Export downloads a portable rule library document; import replaces the stored library from such a document.</p>
   </section>
 
   <section>
@@ -97,6 +104,7 @@
       <span id="summary" class="muted"></span>
       <a id="export" href="#" hidden>Export Markdown</a>
     </div>
+    <div id="suppressed"></div>
     <div id="findings"></div>
   </section>
 
@@ -154,6 +162,48 @@ async function api(method, url, body) {
   return data;
 }
 
+function renderSuppressed(stats) {
+  const box = $("suppressed");
+  box.textContent = "";
+  const rows = Array.isArray(stats.suppressed_rules) ? stats.suppressed_rules : [];
+  if (!rows.length) return;
+  const caption = document.createElement("p");
+  caption.className = "muted";
+  caption.textContent = "Suppressed findings by rule:";
+  box.appendChild(caption);
+  const table = document.createElement("table");
+  table.className = "provenance";
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const label of ["Rule id", "Origin", "Kind", "Page", "Value", "Count"]) {
+    const th = document.createElement("th");
+    th.textContent = label;
+    headRow.appendChild(th);
+  }
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+  const tbody = document.createElement("tbody");
+  for (const rule of rows) {
+    const tr = document.createElement("tr");
+    const cells = [
+      rule.id,
+      rule.origin,
+      rule.kind,
+      rule.page || "—",
+      rule.value || "—",
+      rule.count,
+    ];
+    for (const value of cells) {
+      const td = document.createElement("td");
+      td.textContent = String(value === undefined || value === null ? "" : value);
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  box.appendChild(table);
+}
+
 function renderFindings(scan) {
   activeScan = scan;
   const box = $("findings"); box.textContent = "";
@@ -163,6 +213,7 @@ function renderFindings(scan) {
     (stats.unresolved || 0) + " open · " + (stats.high || 0) + " high";
   if (stats.suppressed > 0) { summary += " · " + stats.suppressed + " suppressed"; }
   $("summary").textContent = summary;
+  renderSuppressed(stats);
   if (scan.id) {
     $("export").hidden = false;
     $("export").href = "/api/scans/" + scan.id + "/export.md";
@@ -278,6 +329,46 @@ async function clearWorkspaceRules() {
   } catch (e) { $("ws-status").textContent = e.message; }
 }
 
+async function exportWorkspaceRules() {
+  const ws = $("ws-name").value.trim();
+  if (!ws) { $("ws-status").textContent = "Enter a workspace name."; return; }
+  try {
+    const res = await fetch("/api/workspaces/" + encodeURIComponent(ws) + "/rules/export");
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || ("HTTP " + res.status));
+    }
+    const text = await res.text();
+    const blob = new Blob([text], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "workspace-" + ws + "-rules.json";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    $("ws-status").textContent = "Exported rules for " + ws + ".";
+  } catch (e) { $("ws-status").textContent = e.message; }
+}
+
+async function importWorkspaceRules(file) {
+  const ws = $("ws-name").value.trim();
+  if (!ws) { $("ws-status").textContent = "Enter a workspace name."; return; }
+  try {
+    let doc;
+    try { doc = JSON.parse(await file.text()); }
+    catch (e) { throw new Error("Invalid JSON file: " + e.message); }
+    const data = await api(
+      "POST",
+      "/api/workspaces/" + encodeURIComponent(ws) + "/rules/import",
+      doc
+    );
+    $("ws-rules").value = JSON.stringify(data.rules || [], null, 2);
+    $("ws-status").textContent = "Imported " + (data.imported || 0) + " rule(s).";
+  } catch (e) { $("ws-status").textContent = e.message; }
+}
+
 function syncWorkspaceNote() {
   $("workspace-note").hidden = !$("workspace").value.trim();
 }
@@ -290,6 +381,13 @@ $("workspace-note-link").addEventListener("click", () => {
 $("ws-load").addEventListener("click", loadWorkspaceRules);
 $("ws-save").addEventListener("click", saveWorkspaceRules);
 $("ws-clear").addEventListener("click", clearWorkspaceRules);
+$("ws-export").addEventListener("click", exportWorkspaceRules);
+$("ws-import").addEventListener("click", () => $("ws-import-file").click());
+$("ws-import-file").addEventListener("change", () => {
+  const file = $("ws-import-file").files[0];
+  if (file) { importWorkspaceRules(file); }
+  $("ws-import-file").value = "";
+});
 $("analyze").addEventListener("click", () => run(false));
 $("save").addEventListener("click", () => run(true));
 loadScans();

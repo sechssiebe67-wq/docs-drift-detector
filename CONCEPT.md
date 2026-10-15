@@ -65,6 +65,19 @@ manual review marathon.
   precedence, and the combined suppressions are reported in the summary. The
   library is managed through `GET`/`PUT`/`DELETE /api/workspaces/{ws}/rules` and
   is stored alongside scans in the same JSON file.
+- **Portable rule-library import/export.** A workspace library can be downloaded
+  as a versioned JSON document (`GET /api/workspaces/{ws}/rules/export`) and
+  loaded back with a single request (`POST /api/workspaces/{ws}/rules/import`),
+  so a curated rule set can move from staging to production or between
+  workspaces. Import replaces the stored library and reports how many rules were
+  imported; malformed documents are rejected with HTTP 400.
+- **Rule provenance in the suppressed summary.** Every normalised rule carries a
+  stable `id` (a short hash of `kind|page|value`) and an `origin`
+  (`request` or `workspace`). The scan summary keeps the integer
+  `stats.suppressed` total for backwards compatibility and adds
+  `stats.suppressed_rules`, a per-rule breakdown of `{id, origin, kind, page,
+  value, count}` sorted by descending count, so teams can audit *why* findings
+  were suppressed and which rule did it.
 - **Operational endpoints.** `GET /healthz` plus a stateless JSON API.
 
 ## Differentiation
@@ -80,8 +93,8 @@ release-to-docs comparison with text and screenshot matching.
 - Screenshot diffing with per-region highlighting instead of change signals.
 - Pluggable connectors for GitHub commit ranges and rendered docs sites.
 - Per-workspace repositories and doc-page quotas for the tiered SaaS plan.
-- Import/export of workspace rule libraries (e.g. share a library file between
-  environments) and rule provenance in the suppressed-findings summary.
+- Rule-library history and one-click promotion between environments, building on
+  the export document and the per-rule provenance now captured in every scan.
 
 ## Non-goals and known limits
 

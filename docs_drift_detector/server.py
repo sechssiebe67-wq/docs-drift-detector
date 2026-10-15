@@ -107,6 +107,31 @@ class Handler(BaseHTTPRequestHandler):
             if not _valid_id(parts[2]):
                 return self._error(400, "invalid workspace id")
             return self._json(200, {"rules": self.server.store.list_workspace_rules(parts[2])})
+        if (
+            len(parts) == 5
+            and parts[:2] == ["api", "workspaces"]
+            and parts[3] == "rules"
+            and parts[4] == "export"
+        ):
+            if not _valid_id(parts[2]):
+                return self._error(400, "invalid workspace id")
+            document = {
+                "version": 1,
+                "workspace": parts[2],
+                "rules": self.server.store.list_workspace_rules(parts[2]),
+            }
+            body = json.dumps(document, ensure_ascii=False, indent=2).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header(
+                "Content-Disposition", 'attachment; filename="workspace-%s-rules.json"' % parts[2]
+            )
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+            return
         if parts == ["api", "scans"]:
             return self._json(200, {"scans": self.server.store.list_scans()})
         if len(parts) == 3 and parts[:2] == ["api", "scans"] and _valid_id(parts[2]):
@@ -147,6 +172,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._analyze(data, store=False)
         if parts == ["api", "scans"]:
             return self._analyze(data, store=True)
+        if (
+            len(parts) == 5
+            and parts[:2] == ["api", "workspaces"]
+            and parts[3] == "rules"
+            and parts[4] == "import"
+        ):
+            if not _valid_id(parts[2]):
+                return self._error(400, "invalid workspace id")
+            rules = data.get("rules")
+            if not isinstance(rules, list):
+                return self._error(400, "invalid rules document")
+            stored = self.server.store.set_workspace_rules(parts[2], rules)
+            return self._json(200, {"rules": stored, "imported": len(stored)})
         if (
             len(parts) == 6
             and parts[:2] == ["api", "scans"]
@@ -211,17 +249,27 @@ class Handler(BaseHTTPRequestHandler):
             stats=report,
         )
         suppressed = report.get("suppressed", 0)
-        return changes, findings, {"pages": pages, "metrics": metrics, "suppressed": suppressed}
+        suppressed_rules = report.get("suppressed_rules", [])
+        return changes, findings, {
+            "pages": pages,
+            "metrics": metrics,
+            "suppressed": suppressed,
+            "suppressed_rules": suppressed_rules,
+        }
 
     def _merge_rules(self, request_rules: Any, workspace: Optional[str]) -> List[Dict[str, str]]:
         """Combine per-scan rules with the workspace library.
 
-        Per-scan rules are normalised first and take precedence; both the
-        per-scan rules and the stored workspace rules are applied so that their
-        suppressions are additive.
+        Per-scan rules are normalised first and tagged with ``origin=request``;
+        stored workspace rules are tagged with ``origin=workspace``. Both sets
+        are applied so that their suppressions are additive and the provenance
+        of each suppression is preserved.
         """
-        requested = analyze._normalise_rules(request_rules)
-        stored = self.server.store.list_workspace_rules(workspace) if workspace else []
+        requested = analyze._normalise_rules(request_rules, origin="request")
+        stored = analyze._normalise_rules(
+            self.server.store.list_workspace_rules(workspace) if workspace else [],
+            origin="workspace",
+        )
         return requested + stored
 
     @staticmethod
@@ -253,7 +301,12 @@ class Handler(BaseHTTPRequestHandler):
                 200,
                 {
                     "findings": findings,
-                    "stats": analyze.summarise(findings, extra["pages"], extra["suppressed"]),
+                    "stats": analyze.summarise(
+                        findings,
+                        extra["pages"],
+                        extra["suppressed"],
+                        extra["suppressed_rules"],
+                    ),
                     "changes": changes,
                 },
             )
@@ -264,6 +317,7 @@ class Handler(BaseHTTPRequestHandler):
             pages=extra["pages"],
             suppressed=extra["suppressed"],
             workspace=workspace,
+            suppressed_rules=extra["suppressed_rules"],
         )
         return self._json(201, scan)
 

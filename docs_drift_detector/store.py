@@ -56,7 +56,7 @@ class Store:
             for workspace, rules in workspace_rules.items():
                 if not isinstance(workspace, str) or not _valid_workspace(workspace):
                     continue
-                loaded[workspace] = analyze._normalise_rules(rules)
+                loaded[workspace] = analyze._normalise_rules(rules, origin="workspace")
             self._workspace_rules = loaded
 
     def _persist(self) -> None:
@@ -93,7 +93,7 @@ class Store:
 
     def set_workspace_rules(self, workspace: str, rules: Any) -> List[Dict[str, str]]:
         name = self._check_workspace(workspace)
-        normalised = analyze._normalise_rules(rules)
+        normalised = analyze._normalise_rules(rules, origin="workspace")
         with self._lock:
             self._workspace_rules[name] = normalised
             self._persist()
@@ -116,6 +116,7 @@ class Store:
         pages: Optional[List[Any]] = None,
         suppressed: int = 0,
         workspace: Optional[str] = None,
+        suppressed_rules: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         with self._lock:
             scan_id = uuid.uuid4().hex[:12]
@@ -125,7 +126,7 @@ class Store:
                 "source": (source or "release").strip()[:200] or "release",
                 "created_at": _utc_now(),
                 "findings": findings,
-                "stats": analyze.summarise(findings, pages, suppressed),
+                "stats": analyze.summarise(findings, pages, suppressed, suppressed_rules),
             }
             if workspace:
                 scan["workspace"] = self._check_workspace(workspace)
@@ -165,8 +166,12 @@ class Store:
                     break
             if updated is None:
                 return None
-            suppressed = scan.get("stats", {}).get("suppressed", 0)
-            scan["stats"] = analyze.summarise(scan.get("findings", []), suppressed=suppressed)
+            stats = scan.get("stats", {}) or {}
+            scan["stats"] = analyze.summarise(
+                scan.get("findings", []),
+                suppressed=stats.get("suppressed", 0),
+                suppressed_rules=stats.get("suppressed_rules", []),
+            )
             self._persist()
             return copy.deepcopy(scan)
 

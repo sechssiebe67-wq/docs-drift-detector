@@ -273,6 +273,141 @@ class ServerTest(unittest.TestCase):
         status, _, _ = self._request("GET", "/static/../server.py")
         self.assertEqual(status, 404)
 
+    def test_rules_export_document_and_attachment(self):
+        ws = "wsExport"
+        self._json(
+            "PUT",
+            "/api/workspaces/%s/rules" % ws,
+            {"rules": [{"kind": "label", "value": "Save"}, {"value": "Projects"}]},
+        )
+        req = urllib.request.Request(self._url("/api/workspaces/%s/rules/export" % ws), method="GET")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+            self.assertIn("application/json", resp.headers.get("Content-Type", ""))
+            self.assertIn("attachment", resp.headers.get("Content-Disposition", ""))
+            self.assertIn(ws, resp.headers.get("Content-Disposition", ""))
+            document = json.loads(resp.read().decode("utf-8"))
+        self.assertEqual(document["version"], 1)
+        self.assertEqual(document["workspace"], ws)
+        self.assertEqual(len(document["rules"]), 2)
+        for rule in document["rules"]:
+            self.assertTrue(rule["id"])
+            self.assertEqual(rule["origin"], "workspace")
+
+    def test_rules_export_import_roundtrip(self):
+        source = "wsRoundTrip"
+        target = "wsRoundTrip2"
+        original = [
+            {"kind": "label", "page": "help/*.md", "value": "Save", "reason": "example"},
+            {"kind": "route", "value": "/settings"},
+        ]
+        self._json("PUT", "/api/workspaces/%s/rules" % source, {"rules": original})
+
+        req = urllib.request.Request(
+            self._url("/api/workspaces/%s/rules/export" % source), method="GET"
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            document = json.loads(resp.read().decode("utf-8"))
+
+        status, payload = self._json("POST", "/api/workspaces/%s/rules/import" % target, document)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["imported"], 2)
+        self.assertEqual(len(payload["rules"]), 2)
+
+        status, stored = self._json("GET", "/api/workspaces/%s/rules" % target)
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            [(r["kind"], r["page"], r["value"]) for r in stored["rules"]],
+            [("label", "help/*.md", "Save"), ("route", "", "/settings")],
+        )
+        self.assertEqual(stored["rules"], payload["rules"])
+
+        status, again = self._json("POST", "/api/workspaces/%s/rules/import" % target, document)
+        self.assertEqual(status, 200)
+        self.assertEqual(again["imported"], 2)
+        self.assertEqual(again["rules"], payload["rules"])
+
+    def test_rules_import_accepts_bare_rules(self):
+        status, payload = self._json(
+            "POST",
+            "/api/workspaces/wsBare/rules/import",
+            {"rules": [{"kind": "label", "value": "Save"}]},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["imported"], 1)
+
+    def test_rules_import_replaces_library(self):
+        ws = "wsReplace"
+        self._json(
+            "PUT", "/api/workspaces/%s/rules" % ws, {"rules": [{"kind": "label", "value": "Old"}]}
+        )
+        status, _ = self._json(
+            "POST",
+            "/api/workspaces/%s/rules/import" % ws,
+            {"rules": [{"kind": "label", "value": "New"}]},
+        )
+        self.assertEqual(status, 200)
+        status, stored = self._json("GET", "/api/workspaces/%s/rules" % ws)
+        self.assertEqual([r["value"] for r in stored["rules"]], ["New"])
+
+    def test_rules_import_malformed_body_returns_400(self):
+        ws = "wsMalformed"
+        for body in ({}, {"rules": None}, {"rules": "not-a-list"}, {"rules": {"kind": "label"}}):
+            status, payload = self._json("POST", "/api/workspaces/%s/rules/import" % ws, body)
+            self.assertEqual(status, 400, body)
+            self.assertIn("error", payload)
+
+    def test_rules_export_import_invalid_workspace_returns_400(self):
+        status, _ = self._json("GET", "/api/workspaces/bad%20id!/rules/export")
+        self.assertEqual(status, 400)
+        status, _ = self._json(
+            "POST", "/api/workspaces/bad%20id!/rules/import", {"rules": []}
+        )
+        self.assertEqual(status, 400)
+
+    def test_analyze_reports_rule_provenance(self):
+        ws = "wsProvenance"
+        self._json(
+            "PUT", "/api/workspaces/%s/rules" % ws, {"rules": [{"kind": "label", "value": "Save"}]}
+        )
+        body = {
+            "workspace": ws,
+            "changelog": 'renamed "Save" to "Save changes"\n"/settings" -> "/account/settings"',
+            "pages": [{"path": "help/a.md", "content": "Click Save. Go to /settings."}],
+            "rules": [{"kind": "route", "value": "/settings"}],
+        }
+        status, payload = self._json("POST", "/api/analyze", body)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["findings"], [])
+        stats = payload["stats"]
+        self.assertEqual(stats["suppressed"], 2)
+        origins = {entry["origin"]: entry for entry in stats["suppressed_rules"]}
+        self.assertEqual(set(origins), {"request", "workspace"})
+        self.assertEqual(origins["workspace"]["kind"], "label")
+        self.assertEqual(origins["workspace"]["count"], 1)
+        self.assertEqual(origins["request"]["kind"], "route")
+        self.assertEqual(origins["request"]["count"], 1)
+
+    def test_scan_persists_suppressed_rule_provenance(self):
+        ws = "wsScanProv"
+        self._json(
+            "PUT", "/api/workspaces/%s/rules" % ws, {"rules": [{"kind": "label", "value": "Save"}]}
+        )
+        body = {
+            "name": "Provenance scan",
+            "workspace": ws,
+            "changelog": 'renamed "Save" to "Save changes"',
+            "pages": [{"path": "help/a.md", "content": "Click Save."}],
+        }
+        status, scan = self._json("POST", "/api/scans", body)
+        self.assertEqual(status, 201)
+        self.assertEqual(scan["stats"]["suppressed"], 1)
+        breakdown = scan["stats"]["suppressed_rules"]
+        self.assertEqual(len(breakdown), 1)
+        self.assertEqual(breakdown[0]["origin"], "workspace")
+        status, fetched = self._json("GET", "/api/scans/" + scan["id"])
+        self.assertEqual(fetched["stats"]["suppressed_rules"], breakdown)
+
 
 if __name__ == "__main__":
     unittest.main()

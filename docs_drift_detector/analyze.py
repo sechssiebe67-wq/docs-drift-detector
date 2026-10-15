@@ -20,6 +20,8 @@ _MAX_VALUE = 200
 
 _RULE_KINDS = ("label", "route", "screenshot", "*")
 
+_RULE_ORIGINS = ("request", "workspace")
+
 _QUOTED = r"\"([^\"\n]{1,160})\"|'([^'\n]{1,160})'|`([^`\n]{1,160})`"
 _ROUTE = r"[\"'`](/[A-Za-z0-9_\-.:{}\[\]*]+(?:/[A-Za-z0-9_\-.:{}\[\]*]*)*)[\"'`]"
 _RENAME = (
@@ -125,42 +127,65 @@ def _dedupe_pairs(pairs: Iterable[Dict[str, str]]) -> List[Dict[str, str]]:
     return result
 
 
-def _normalise_rule(entry: Any) -> Optional[Dict[str, str]]:
+def _rule_id(kind: str, page: str, value: str) -> str:
+    raw = "|".join([kind, page, value]).encode("utf-8")
+    return hashlib.sha1(raw).hexdigest()[:12]
+
+
+def _normalise_origin(entry: Any, origin: Optional[str]) -> str:
+    """Resolve the rule origin, preserving an explicit tag when not overridden."""
+    if origin is not None:
+        return origin if origin in _RULE_ORIGINS else "request"
+    tagged = entry.get("origin") if isinstance(entry, dict) else None
+    return tagged if tagged in _RULE_ORIGINS else "request"
+
+
+def _normalise_rule(
+    entry: Any, origin: Optional[str] = None
+) -> Optional[Dict[str, str]]:
     """Normalise a single ignore rule, returning None for malformed entries."""
+    resolved_origin = _normalise_origin(entry, origin)
     if isinstance(entry, str):
         value = entry.strip()
         if not value:
             return None
-        return {"kind": "*", "page": "", "value": value, "reason": ""}
-    if not isinstance(entry, dict):
-        return None
+        rule = {"kind": "*", "page": "", "value": value, "reason": ""}
+    elif isinstance(entry, dict):
+        kind = entry.get("kind", "*")
+        if not isinstance(kind, str) or kind.strip().lower() not in _RULE_KINDS:
+            kind = "*"
+        else:
+            kind = kind.strip().lower()
 
-    kind = entry.get("kind", "*")
-    if not isinstance(kind, str) or kind.strip().lower() not in _RULE_KINDS:
-        kind = "*"
+        page = entry.get("page", entry.get("path", ""))
+        page = page.strip() if isinstance(page, str) else ""
+
+        value = entry.get("value", entry.get("old_value", entry.get("old", "")))
+        value = value.strip() if isinstance(value, str) else ""
+
+        reason = entry.get("reason", "")
+        reason = reason.strip() if isinstance(reason, str) else ""
+
+        if not page and not value and kind == "*":
+            return None
+        rule = {"kind": kind, "page": page, "value": value, "reason": reason}
     else:
-        kind = kind.strip().lower()
-
-    page = entry.get("page", entry.get("path", ""))
-    page = page.strip() if isinstance(page, str) else ""
-
-    value = entry.get("value", entry.get("old_value", entry.get("old", "")))
-    value = value.strip() if isinstance(value, str) else ""
-
-    reason = entry.get("reason", "")
-    reason = reason.strip() if isinstance(reason, str) else ""
-
-    if not page and not value and kind == "*":
         return None
-    return {"kind": kind, "page": page, "value": value, "reason": reason}
+
+    rule["id"] = _rule_id(rule["kind"], rule["page"], rule["value"])
+    rule["origin"] = resolved_origin
+    return rule
 
 
-def _normalise_rules(rules: Any) -> List[Dict[str, str]]:
+def _normalise_rules(rules: Any, origin: Optional[str] = None) -> List[Dict[str, str]]:
     """Normalise a rules input into a list of rule dicts.
 
     Accepts a list of dicts or strings (a bare dict is treated as a single
-    rule). Malformed entries are ignored silently so a bad rules value can
-    never raise into the caller.
+    rule). Each rule is tagged with a stable ``id`` and an ``origin``
+    (``request`` or ``workspace``). When ``origin`` is omitted an existing
+    ``origin`` on a rule is preserved and anything else defaults to
+    ``request``. Malformed entries are ignored silently so a bad rules value
+    can never raise into the caller.
     """
     if isinstance(rules, dict):
         rules = [rules]
@@ -168,13 +193,16 @@ def _normalise_rules(rules: Any) -> List[Dict[str, str]]:
         return []
     result = []
     for entry in rules:
-        rule = _normalise_rule(entry)
+        rule = _normalise_rule(entry, origin)
         if rule is not None:
             result.append(rule)
     return result
 
 
-def _matches_rule(finding: Dict[str, Any], rules: List[Dict[str, str]]) -> bool:
+def _match_rule(
+    finding: Dict[str, Any], rules: List[Dict[str, str]]
+) -> Optional[Dict[str, str]]:
+    """Return the first rule that suppresses ``finding``, or None."""
     kind = str(finding.get("kind") or "").lower()
     page = str(finding.get("page") or "")
     old = str(finding.get("old_value") or "")
@@ -185,8 +213,8 @@ def _matches_rule(finding: Dict[str, Any], rules: List[Dict[str, str]]) -> bool:
             continue
         if rule["value"] and rule["value"].lower() not in old.lower():
             continue
-        return True
-    return False
+        return rule
+    return None
 
 
 def extract_label_changes(
@@ -464,14 +492,38 @@ def detect_drift(
     findings = _dedupe_findings(findings)
 
     suppressed = 0
+    suppressed_counts: Dict[Tuple[str, str], int] = {}
+    rule_lookup: Dict[Tuple[str, str], Dict[str, str]] = {}
     if normalised_rules:
+        for rule in normalised_rules:
+            rule_lookup[(rule["id"], rule["origin"])] = rule
         kept: List[Dict[str, Any]] = []
         for finding in findings:
-            if _matches_rule(finding, normalised_rules):
+            matched = _match_rule(finding, normalised_rules)
+            if matched is not None:
                 suppressed += 1
+                key = (matched["id"], matched["origin"])
+                suppressed_counts[key] = suppressed_counts.get(key, 0) + 1
             else:
                 kept.append(finding)
         findings = kept
+
+    suppressed_rules = []
+    for key, count in suppressed_counts.items():
+        rule = rule_lookup.get(key)
+        if rule is None:
+            continue
+        suppressed_rules.append(
+            {
+                "id": rule["id"],
+                "origin": rule["origin"],
+                "kind": rule["kind"],
+                "page": rule["page"],
+                "value": rule["value"],
+                "count": count,
+            }
+        )
+    suppressed_rules.sort(key=lambda r: (-r["count"], r["id"]))
 
     for finding in findings:
         base = finding.pop("base")
@@ -482,6 +534,7 @@ def detect_drift(
     findings.sort(key=lambda f: (-f["score"], f["page"], f["id"]))
     if stats is not None:
         stats["suppressed"] = suppressed
+        stats["suppressed_rules"] = suppressed_rules
     return findings
 
 
@@ -489,12 +542,15 @@ def summarise(
     findings: List[Dict[str, Any]],
     pages: Optional[Iterable[Any]] = None,
     suppressed: Any = 0,
+    suppressed_rules: Any = None,
 ) -> Dict[str, Any]:
     resolved = sum(1 for f in findings if f.get("resolved"))
     try:
         suppressed_count = max(int(suppressed), 0)
     except (TypeError, ValueError):
         suppressed_count = 0
+    if not isinstance(suppressed_rules, list):
+        suppressed_rules = []
     return {
         "findings": len(findings),
         "unresolved": len(findings) - resolved,
@@ -504,4 +560,5 @@ def summarise(
         "low": sum(1 for f in findings if f.get("severity") == "low"),
         "pages": len(_normalise_pages(pages)) if pages is not None else 0,
         "suppressed": suppressed_count,
+        "suppressed_rules": suppressed_rules,
     }

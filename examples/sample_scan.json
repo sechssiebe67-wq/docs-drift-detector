@@ -1,6 +1,7 @@
 {
   "name": "Release 4.2 preview",
   "source": "release-4.2",
+  "workspace": "ws1",
   "changelog": "renamed \"Save\" to \"Save changes\"\n\"/settings\" -> \"/account/settings\"",
   "diff": "@@ -1,2 +1,2 @@\n-<Button>Delete account</Button>\n+<Button>Delete workspace</Button>\n",
   "labels": [
