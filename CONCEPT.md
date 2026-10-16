@@ -118,6 +118,19 @@ manual review marathon.
   come from `notify.build_payload`, so PR suggestions and webhooks stay
   consistent. A scan with no high-severity findings still returns a document
   with an empty `files` list and a body stating that no action is required.
+- **GitHub pull-request connector.** A workspace can store a GitHub repository
+  config (`GET`/`PUT`/`DELETE /api/workspaces/{ws}/github`) carrying a `repo`
+  (`owner/name`), a `base_branch` (default `main`) and a `token_env` naming the
+  environment variable that holds the token. `POST /api/scans/{id}/pull-request/open`
+  turns a stored scan into a real branch and pull request through the GitHub REST
+  API (standard-library `urllib.request` only): it resolves the base branch,
+  creates the ref, commits the exported drift checklist as
+  `docs-drift/<scan_id>.md` and opens the pull request, returning the connector
+  result `{ok, status, error, pr_url, branch}`. The token is read from the
+  environment and never stored. Opening is also attempted automatically, as a
+  best-effort side effect, after every stored scan for a configured workspace.
+  An unknown scan returns 404, an invalid id, missing `repo` or unset token
+  returns 400, and an upstream failure returns 200 with `ok: false`.
 - **Scheduled drift scans with digest notifications.** A workspace can register
   a recurring drift check (`GET`/`PUT`/`DELETE /api/workspaces/{ws}/schedule`)
   carrying an interval in hours (`1..168`), an optional stored `scan` payload
@@ -144,13 +157,14 @@ release-to-docs comparison with text and screenshot matching.
 
 ## Next direction
 
-- The outbound-notification item is half shipped: the configurable per-workspace
-  webhook now notifies a Slack/Teams/CI endpoint about high-severity findings
-  once per stored scan. The **pull-request suggestion** is now shipped as a
-  dependency-free document (`GET /api/scans/{id}/pull-request`) that a team or a
-  thin CI wrapper can turn into a branch and PR. What remains is the **GitHub
-  connector** that opens that branch/PR autonomously and pushes the exported
-  checklist, reusing the same high-severity scope.
+- The outbound-notification and pull-request items are now shipped: the
+  configurable per-workspace webhook notifies a Slack/Teams/CI endpoint about
+  high-severity findings once per stored scan, the **pull-request suggestion**
+  remains available as a dependency-free document
+  (`GET /api/scans/{id}/pull-request`) for a thin CI wrapper, and the **GitHub
+  connector** now opens that branch/PR autonomously, pushing the exported
+  checklist with the same high-severity scope. What remains is broader connector
+  coverage and making repositories first-class per-workspace objects.
 - Screenshot diffing with per-region highlighting instead of change signals.
 - Pluggable connectors for GitHub commit ranges and rendered docs sites.
 - Per-workspace repositories and doc-page quotas for the tiered SaaS plan.
@@ -172,6 +186,12 @@ release-to-docs comparison with text and screenshot matching.
   whole hours only) and no durable job queue, so a process restart skips any
   tick that was missed while it was down. Digest delivery is the same
   best-effort webhook POST as ordinary notifications.
+- The GitHub connector is best-effort and single-PR: it commits the drift
+  checklist report rather than editing the documentation prose, never
+  force-pushes (if the branch already exists the call fails instead of moving
+  it), and reads the token from a named environment variable rather than storing
+  it. Automatic opening is skipped when a workspace has no configured repository,
+  and any failure is only logged to stderr.
 - The tool recommends work; it does not autonomously edit documentation.
 
 ## Revenue hypothesis

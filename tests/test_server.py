@@ -9,7 +9,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from docs_drift_detector import notify  # noqa: E402
+from docs_drift_detector import github, notify  # noqa: E402
 from docs_drift_detector.server import create_server  # noqa: E402
 from docs_drift_detector.store import Store  # noqa: E402
 
@@ -896,6 +896,296 @@ class ServerTest(unittest.TestCase):
             )
             self.assertEqual(status, 400, query)
             self.assertIn("error", payload)
+
+    def _workspace_scan(self, workspace, name="Workspace scan"):
+        body = {
+            "name": name,
+            "workspace": workspace,
+            "changelog": 'renamed "Save" to "Save changes"\n"/settings" -> "/account/settings"',
+            "pages": [{"path": "help/a.md", "content": "Click Save. Go to /settings."}],
+            "metrics": {"help/a.md": {"views": 100000, "tickets": 5}},
+        }
+        status, scan = self._json("POST", "/api/scans", body)
+        self.assertEqual(status, 201)
+        return scan
+
+    def test_workspace_github_lifecycle(self):
+        ws = "wsGithubLife"
+        status, payload = self._json("GET", "/api/workspaces/%s/github" % ws)
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            payload,
+            {
+                "workspace": ws,
+                "repo": "",
+                "base_branch": "main",
+                "token_env": "GITHUB_TOKEN",
+            },
+        )
+
+        status, payload = self._json(
+            "PUT",
+            "/api/workspaces/%s/github" % ws,
+            {"repo": "owner/name", "base_branch": "develop", "token_env": "DOCS_TOKEN"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["repo"], "owner/name")
+        self.assertEqual(payload["base_branch"], "develop")
+        self.assertEqual(payload["token_env"], "DOCS_TOKEN")
+
+        status, payload = self._json("GET", "/api/workspaces/%s/github" % ws)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["repo"], "owner/name")
+
+        status, payload = self._json("DELETE", "/api/workspaces/%s/github" % ws)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {"deleted": ws})
+        status, payload = self._json("GET", "/api/workspaces/%s/github" % ws)
+        self.assertEqual(payload["repo"], "")
+
+    def test_workspace_github_validation_returns_400(self):
+        ws = "wsGithubBad"
+        for body in (
+            {},
+            {"repo": "not-a-repo"},
+            {"repo": "owner/name/extra"},
+            {"repo": "owner/name", "base_branch": "bad branch!"},
+            {"repo": "owner/name", "token_env": "1BAD"},
+        ):
+            status, payload = self._json("PUT", "/api/workspaces/%s/github" % ws, body)
+            self.assertEqual(status, 400, body)
+            self.assertIn("error", payload)
+
+    def test_workspace_github_invalid_id_returns_400(self):
+        status, _ = self._json("GET", "/api/workspaces/bad%20id!/github")
+        self.assertEqual(status, 400)
+        status, _ = self._json(
+            "PUT", "/api/workspaces/bad%20id!/github", {"repo": "owner/name"}
+        )
+        self.assertEqual(status, 400)
+        status, _ = self._json("DELETE", "/api/workspaces/bad%20id!/github")
+        self.assertEqual(status, 400)
+
+    def test_workspace_github_survives_store_reload(self):
+        ws = "wsGithubDisk"
+        self._json(
+            "PUT", "/api/workspaces/%s/github" % ws, {"repo": "owner/name"}
+        )
+        reopened = Store(os.path.join(self.tmp.name, "scans.json"))
+        self.assertEqual(reopened.get_workspace_github(ws)["repo"], "owner/name")
+
+    def test_open_pull_request_endpoint_returns_connector_result(self):
+        ws = "wsGithubOpen"
+        scan = self._workspace_scan(ws)
+        self.addCleanup(self._json, "DELETE", "/api/scans/%s" % scan["id"])
+        os.environ["DDR_SERVER_GITHUB_TOKEN"] = "x"
+        self.addCleanup(os.environ.pop, "DDR_SERVER_GITHUB_TOKEN", None)
+        self._json(
+            "PUT",
+            "/api/workspaces/%s/github" % ws,
+            {
+                "repo": "owner/name",
+                "base_branch": "develop",
+                "token_env": "DDR_SERVER_GITHUB_TOKEN",
+            },
+        )
+
+        captured = {}
+        original = github.open_pull_request
+
+        def fake(config, suggestion, opener=None):
+            captured["config"] = config
+            captured["suggestion"] = suggestion
+            return {
+                "ok": True,
+                "status": 201,
+                "error": "",
+                "pr_url": "https://github.com/owner/name/pull/1",
+                "branch": suggestion["branch"],
+            }
+
+        github.open_pull_request = fake
+        try:
+            status, payload = self._json(
+                "POST", "/api/scans/%s/pull-request/open" % scan["id"]
+            )
+        finally:
+            github.open_pull_request = original
+
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["pr_url"], "https://github.com/owner/name/pull/1")
+        self.assertEqual(payload["branch"], "docs-drift/%s" % scan["id"])
+        self.assertEqual(captured["config"]["repo"], "owner/name")
+        self.assertEqual(captured["suggestion"]["scan_id"], scan["id"])
+        self.assertEqual(captured["suggestion"]["base_branch"], "develop")
+
+    def test_open_pull_request_upstream_failure_returns_200(self):
+        ws = "wsGithubOpenFail"
+        scan = self._workspace_scan(ws)
+        self.addCleanup(self._json, "DELETE", "/api/scans/%s" % scan["id"])
+        os.environ["DDR_SERVER_GITHUB_TOKEN"] = "x"
+        self.addCleanup(os.environ.pop, "DDR_SERVER_GITHUB_TOKEN", None)
+        self._json(
+            "PUT",
+            "/api/workspaces/%s/github" % ws,
+            {"repo": "owner/name", "token_env": "DDR_SERVER_GITHUB_TOKEN"},
+        )
+
+        original = github.open_pull_request
+        github.open_pull_request = lambda config, suggestion, opener=None: {
+            "ok": False,
+            "status": 500,
+            "error": "HTTP 500",
+            "pr_url": "",
+            "branch": suggestion["branch"],
+        }
+        try:
+            status, payload = self._json(
+                "POST", "/api/scans/%s/pull-request/open" % scan["id"]
+            )
+        finally:
+            github.open_pull_request = original
+
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["status"], 500)
+
+    def test_open_pull_request_prefix_query(self):
+        ws = "wsGithubOpenPrefix"
+        scan = self._workspace_scan(ws)
+        self.addCleanup(self._json, "DELETE", "/api/scans/%s" % scan["id"])
+        os.environ["DDR_SERVER_GITHUB_TOKEN"] = "x"
+        self.addCleanup(os.environ.pop, "DDR_SERVER_GITHUB_TOKEN", None)
+        self._json(
+            "PUT",
+            "/api/workspaces/%s/github" % ws,
+            {"repo": "owner/name", "token_env": "DDR_SERVER_GITHUB_TOKEN"},
+        )
+
+        captured = {}
+        original = github.open_pull_request
+
+        def fake(config, suggestion, opener=None):
+            captured["suggestion"] = suggestion
+            return {"ok": True, "status": 201, "error": "", "pr_url": "u", "branch": suggestion["branch"]}
+
+        github.open_pull_request = fake
+        try:
+            status, payload = self._json(
+                "POST",
+                "/api/scans/%s/pull-request/open?prefix=release" % scan["id"],
+            )
+        finally:
+            github.open_pull_request = original
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["branch"], "release/%s" % scan["id"])
+        self.assertEqual(captured["suggestion"]["branch"], "release/%s" % scan["id"])
+
+    def test_open_pull_request_missing_config_returns_400(self):
+        scan = self._workspace_scan("wsGithubUnset")
+        self.addCleanup(self._json, "DELETE", "/api/scans/%s" % scan["id"])
+        status, payload = self._json(
+            "POST", "/api/scans/%s/pull-request/open" % scan["id"]
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("error", payload)
+
+    def test_open_pull_request_unset_token_returns_400(self):
+        ws = "wsGithubNoToken"
+        scan = self._workspace_scan(ws)
+        self.addCleanup(self._json, "DELETE", "/api/scans/%s" % scan["id"])
+        os.environ.pop("DDR_SERVER_MISSING_TOKEN", None)
+        self._json(
+            "PUT",
+            "/api/workspaces/%s/github" % ws,
+            {"repo": "owner/name", "token_env": "DDR_SERVER_MISSING_TOKEN"},
+        )
+        status, payload = self._json(
+            "POST", "/api/scans/%s/pull-request/open" % scan["id"]
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("DDR_SERVER_MISSING_TOKEN", payload["error"])
+
+    def test_open_pull_request_unknown_and_invalid_ids(self):
+        status, _ = self._json("POST", "/api/scans/doesnotexist123/pull-request/open")
+        self.assertEqual(status, 404)
+        status, _ = self._json("POST", "/api/scans/bad%20id!/pull-request/open")
+        self.assertEqual(status, 400)
+        status, _ = self._json("POST", "/api/scans/bad/id/pull-request/open")
+        self.assertEqual(status, 400)
+
+    def test_open_pull_request_invalid_prefix_returns_400(self):
+        ws = "wsGithubBadPrefix"
+        scan = self._workspace_scan(ws)
+        self.addCleanup(self._json, "DELETE", "/api/scans/%s" % scan["id"])
+        os.environ["DDR_SERVER_GITHUB_TOKEN"] = "x"
+        self.addCleanup(os.environ.pop, "DDR_SERVER_GITHUB_TOKEN", None)
+        self._json(
+            "PUT",
+            "/api/workspaces/%s/github" % ws,
+            {"repo": "owner/name", "token_env": "DDR_SERVER_GITHUB_TOKEN"},
+        )
+        status, _ = self._json(
+            "POST", "/api/scans/%s/pull-request/open?prefix=bad%%20prefix" % scan["id"]
+        )
+        self.assertEqual(status, 400)
+
+    def test_scan_auto_opens_pull_request(self):
+        ws = "wsGithubAuto"
+        os.environ["DDR_SERVER_GITHUB_TOKEN"] = "x"
+        self.addCleanup(os.environ.pop, "DDR_SERVER_GITHUB_TOKEN", None)
+        status, _ = self._json(
+            "PUT",
+            "/api/workspaces/%s/github" % ws,
+            {"repo": "owner/name", "token_env": "DDR_SERVER_GITHUB_TOKEN"},
+        )
+        self.assertEqual(status, 200)
+
+        captured = {}
+        original = github.open_pull_request
+
+        def fake(config, suggestion, opener=None):
+            captured["config"] = config
+            captured["suggestion"] = suggestion
+            return {"ok": True, "status": 201, "error": "", "pr_url": "u", "branch": suggestion["branch"]}
+
+        github.open_pull_request = fake
+        try:
+            scan = self._workspace_scan(ws, name="Auto PR")
+        finally:
+            github.open_pull_request = original
+        self.addCleanup(self._json, "DELETE", "/api/scans/%s" % scan["id"])
+
+        self.assertEqual(captured["config"]["repo"], "owner/name")
+        self.assertEqual(captured["suggestion"]["scan_id"], scan["id"])
+        self.assertEqual(captured["suggestion"]["name"], "Auto PR")
+
+    def test_scan_with_failing_github_still_returns_201(self):
+        ws = "wsGithubAutoFail"
+        os.environ["DDR_SERVER_GITHUB_TOKEN"] = "x"
+        self.addCleanup(os.environ.pop, "DDR_SERVER_GITHUB_TOKEN", None)
+        self._json(
+            "PUT",
+            "/api/workspaces/%s/github" % ws,
+            {"repo": "owner/name", "token_env": "DDR_SERVER_GITHUB_TOKEN"},
+        )
+        original = github.open_pull_request
+        github.open_pull_request = lambda config, suggestion, opener=None: {
+            "ok": False,
+            "status": 500,
+            "error": "HTTP 500",
+            "pr_url": "",
+            "branch": suggestion["branch"],
+        }
+        try:
+            scan = self._workspace_scan(ws, name="Auto PR fail")
+        finally:
+            github.open_pull_request = original
+        self.addCleanup(self._json, "DELETE", "/api/scans/%s" % scan["id"])
+        self.assertEqual(scan["name"], "Auto PR fail")
+        self.assertEqual(scan["stats"]["high"], 2)
 
 
 if __name__ == "__main__":
