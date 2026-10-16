@@ -1,4 +1,5 @@
 import json
+import io
 import os
 import sys
 import tempfile
@@ -6,6 +7,7 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
+from contextlib import redirect_stderr
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -1186,6 +1188,113 @@ class ServerTest(unittest.TestCase):
         self.addCleanup(self._json, "DELETE", "/api/scans/%s" % scan["id"])
         self.assertEqual(scan["name"], "Auto PR fail")
         self.assertEqual(scan["stats"]["high"], 2)
+
+    def test_workspace_retention_lifecycle(self):
+        ws = "wsRetLife"
+        status, payload = self._json("GET", "/api/workspaces/%s/retention" % ws)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {"workspace": ws, "max_scans": 0})
+
+        status, payload = self._json(
+            "PUT", "/api/workspaces/%s/retention" % ws, {"max_scans": 3}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {"workspace": ws, "max_scans": 3})
+
+        status, payload = self._json("GET", "/api/workspaces/%s/retention" % ws)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {"workspace": ws, "max_scans": 3})
+
+        status, payload = self._json(
+            "PUT", "/api/workspaces/%s/retention" % ws, {"max_scans": 0}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {"workspace": ws, "max_scans": 0})
+        status, payload = self._json("GET", "/api/workspaces/%s/retention" % ws)
+        self.assertEqual(payload["max_scans"], 0)
+
+        self._json("PUT", "/api/workspaces/%s/retention" % ws, {"max_scans": 5})
+        status, payload = self._json("DELETE", "/api/workspaces/%s/retention" % ws)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {"deleted": ws})
+        status, payload = self._json("GET", "/api/workspaces/%s/retention" % ws)
+        self.assertEqual(payload["max_scans"], 0)
+
+    def test_workspace_retention_validation_returns_400(self):
+        ws = "wsRetBad"
+        for bad in (
+            {"max_scans": "3"},
+            {"max_scans": -1},
+            {"max_scans": 10001},
+            {"max_scans": 1.5},
+            {"max_scans": True},
+            {},
+        ):
+            status, payload = self._json(
+                "PUT", "/api/workspaces/%s/retention" % ws, bad
+            )
+            self.assertEqual(status, 400, bad)
+            self.assertIn("error", payload)
+
+    def test_workspace_retention_invalid_id_returns_400(self):
+        for method in ("GET", "PUT", "DELETE"):
+            body = {"max_scans": 2} if method == "PUT" else None
+            status, _ = self._json(
+                method, "/api/workspaces/bad%20id!/retention", body
+            )
+            self.assertEqual(status, 400, method)
+
+    def test_retention_prunes_automatically_on_scan(self):
+        ws = "wsRetPrune"
+        other = "wsRetOther"
+        self._json("PUT", "/api/workspaces/%s/retention" % ws, {"max_scans": 2})
+
+        scan_ids = [
+            self._workspace_scan(ws, name=label)["id"]
+            for label in ("RetP1", "RetP2", "RetP3")
+        ]
+        other_scan = self._workspace_scan(other, name="RetOther1")
+        status, plain = self._json(
+            "POST",
+            "/api/scans",
+            {
+                "name": "RetPlain1",
+                "changelog": 'renamed "Save" to "Save changes"',
+                "pages": [{"path": "help/a.md", "content": "Click Save."}],
+            },
+        )
+        self.assertEqual(status, 201)
+
+        for scan_id in scan_ids[1:] + [other_scan["id"], plain["id"]]:
+            self.addCleanup(self._json, "DELETE", "/api/scans/%s" % scan_id)
+
+        _, listing = self._json("GET", "/api/scans")
+        ids = {scan["id"] for scan in listing["scans"]}
+        self.assertNotIn(scan_ids[0], ids)
+        self.assertIn(scan_ids[1], ids)
+        self.assertIn(scan_ids[2], ids)
+        self.assertIn(other_scan["id"], ids)
+        self.assertIn(plain["id"], ids)
+
+    def test_scan_prune_failure_still_returns_201(self):
+        ws = "wsRetFail"
+        self._json("PUT", "/api/workspaces/%s/retention" % ws, {"max_scans": 1})
+        store = self.server.store
+        original = store.get_workspace_retention
+
+        def boom(workspace):
+            raise RuntimeError("kaboom")
+
+        store.get_workspace_retention = boom
+        stderr = io.StringIO()
+        try:
+            with redirect_stderr(stderr):
+                scan = self._workspace_scan(ws, name="RetFail")
+        finally:
+            store.get_workspace_retention = original
+        self.addCleanup(self._json, "DELETE", "/api/scans/%s" % scan["id"])
+        self.assertEqual(scan["name"], "RetFail")
+        self.assertIn("retention prune error", stderr.getvalue())
 
 
 if __name__ == "__main__":

@@ -608,6 +608,106 @@ class StoreTest(unittest.TestCase):
         self.assertEqual([c["workspace"] for c in schedules], ["ws3"])
         self.assertEqual(schedules[0]["scan"]["name"], "Keep")
 
+    def test_workspace_retention_crud(self):
+        self.assertEqual(self.store.get_workspace_retention("ws1"), 0)
+        stored = self.store.set_workspace_retention("ws1", 3)
+        self.assertEqual(stored, {"workspace": "ws1", "max_scans": 3})
+        self.assertEqual(self.store.get_workspace_retention("ws1"), 3)
+        self.assertTrue(self.store.delete_workspace_retention("ws1"))
+        self.assertFalse(self.store.delete_workspace_retention("ws1"))
+        self.assertEqual(self.store.get_workspace_retention("ws1"), 0)
+
+    def test_workspace_retention_zero_clears(self):
+        self.store.set_workspace_retention("ws1", 5)
+        stored = self.store.set_workspace_retention("ws1", 0)
+        self.assertEqual(stored, {"workspace": "ws1", "max_scans": 0})
+        self.assertEqual(self.store.get_workspace_retention("ws1"), 0)
+
+    def test_workspace_retention_validation(self):
+        for bad in (-1, 10001, "3", 2.5, True, None):
+            with self.assertRaises(ValueError):
+                self.store.set_workspace_retention("ws1", bad)
+
+    def test_workspace_retention_rejects_invalid_names(self):
+        for bad in ("bad id!", "", "a" * 65, "a/b", None):
+            with self.assertRaises(ValueError):
+                self.store.get_workspace_retention(bad)
+            with self.assertRaises(ValueError):
+                self.store.set_workspace_retention(bad, 2)
+            with self.assertRaises(ValueError):
+                self.store.delete_workspace_retention(bad)
+
+    def test_workspace_retention_persists_across_instances(self):
+        self.store.set_workspace_retention("ws1", 7)
+        reopened = Store(self.path)
+        self.assertEqual(reopened.get_workspace_retention("ws1"), 7)
+
+    def test_old_store_without_retention_key_loads(self):
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write('{"scans": {}}')
+        reopened = Store(self.path)
+        self.assertEqual(reopened.get_workspace_retention("ws1"), 0)
+        reopened.set_workspace_retention("ws1", 4)
+        self.assertEqual(reopened.get_workspace_retention("ws1"), 4)
+
+    def test_malformed_retention_key_is_tolerated(self):
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "scans": {"s1": {"id": "s1", "name": "Old", "stats": {}}},
+                        "workspace_retention": {
+                            "ws1": "many",
+                            "ws2": -1,
+                            "ws3": 0,
+                            "ws4": 2,
+                            "bad id!": 2,
+                        },
+                    }
+                )
+            )
+        reopened = Store(self.path)
+        self.assertIsNotNone(reopened.get_scan("s1"))
+        self.assertEqual(reopened.get_workspace_retention("ws1"), 0)
+        self.assertEqual(reopened.get_workspace_retention("ws2"), 0)
+        self.assertEqual(reopened.get_workspace_retention("ws3"), 0)
+        self.assertEqual(reopened.get_workspace_retention("ws4"), 2)
+
+    def test_prune_workspace_scans_keeps_newest(self):
+        for name in ("s1", "s2", "s3", "s4"):
+            self.store.create_scan(name, "release", [_finding()], workspace="ws1")
+        deleted = self.store.prune_workspace_scans("ws1", 2)
+        self.assertEqual(deleted, 2)
+        remaining = {
+            scan["name"] for scan in self.store.list_scans() if scan["name"].startswith("s")
+        }
+        self.assertEqual(remaining, {"s3", "s4"})
+
+    def test_prune_workspace_scans_ignores_other_workspaces(self):
+        self.store.create_scan("a1", "release", [_finding()], workspace="ws1")
+        self.store.create_scan("a2", "release", [_finding()], workspace="ws1")
+        self.store.create_scan("b1", "release", [_finding()], workspace="ws2")
+        self.store.create_scan("n1", "release", [_finding()])
+        deleted = self.store.prune_workspace_scans("ws1", 1)
+        self.assertEqual(deleted, 1)
+        names = {scan["name"] for scan in self.store.list_scans()}
+        self.assertEqual(names, {"a2", "b1", "n1"})
+
+    def test_prune_workspace_scans_is_idempotent_and_zero_is_noop(self):
+        self.store.create_scan("s1", "release", [_finding()], workspace="ws1")
+        self.assertEqual(self.store.prune_workspace_scans("ws1", 0), 0)
+        self.assertEqual(len(self.store.list_scans()), 1)
+        self.store.create_scan("s2", "release", [_finding()], workspace="ws1")
+        self.assertEqual(self.store.prune_workspace_scans("ws1", 5), 0)
+        self.assertEqual(self.store.prune_workspace_scans("ws1", 5), 0)
+
+    def test_prune_workspace_scans_validation(self):
+        for bad in (-1, "2", None, True):
+            with self.assertRaises(ValueError):
+                self.store.prune_workspace_scans("ws1", bad)
+        with self.assertRaises(ValueError):
+            self.store.prune_workspace_scans("bad id!", 1)
+
     @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root bypasses filesystem permissions")
     def test_create_scan_survives_write_failure(self):
         directory = os.path.join(self.tmp.name, "ro")

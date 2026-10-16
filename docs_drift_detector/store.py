@@ -28,6 +28,7 @@ MAX_RULE_HISTORY = 20
 MAX_WEBHOOK_URL = 500
 MIN_SCHEDULE_HOURS = 1
 MAX_SCHEDULE_HOURS = 168
+MAX_RETENTION_SCANS = 10000
 DEFAULT_GITHUB_BASE_BRANCH = "main"
 DEFAULT_GITHUB_TOKEN_ENV = "GITHUB_TOKEN"
 _RULE_HISTORY_ACTIONS = ("set", "import", "clear", "promote")
@@ -163,6 +164,15 @@ def _normalise_schedule(workspace: str, config: Any) -> Dict[str, Any]:
     }
 
 
+def _normalise_retention(value: Any) -> Optional[int]:
+    """Return a valid positive retention limit, or None when malformed/unset."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if value < 1 or value > MAX_RETENTION_SCANS:
+        return None
+    return value
+
+
 def _normalise_history_entry(entry: Any) -> Optional[Dict[str, Any]]:
     """Validate a persisted history entry, returning None when malformed."""
     if not isinstance(entry, dict):
@@ -199,6 +209,7 @@ class Store:
         self._workspace_webhooks: Dict[str, str] = {}
         self._workspace_schedules: Dict[str, Dict[str, Any]] = {}
         self._workspace_github: Dict[str, Dict[str, str]] = {}
+        self._workspace_retention: Dict[str, int] = {}
         self._load()
 
     def _load(self) -> None:
@@ -280,6 +291,16 @@ class Store:
                 if normalised_github.get("repo"):
                     loaded_github[workspace] = normalised_github
             self._workspace_github = loaded_github
+        retention = data.get("workspace_retention")
+        if isinstance(retention, dict):
+            loaded_retention: Dict[str, int] = {}
+            for workspace, limit in retention.items():
+                if not isinstance(workspace, str) or not _valid_workspace(workspace):
+                    continue
+                normalised_limit = _normalise_retention(limit)
+                if normalised_limit is not None:
+                    loaded_retention[workspace] = normalised_limit
+            self._workspace_retention = loaded_retention
 
     def _persist(self) -> None:
         directory = os.path.dirname(os.path.abspath(self.path))
@@ -295,6 +316,7 @@ class Store:
                         "workspace_webhooks": self._workspace_webhooks,
                         "workspace_schedules": self._workspace_schedules,
                         "workspace_github": self._workspace_github,
+                        "workspace_retention": self._workspace_retention,
                     },
                     handle,
                     ensure_ascii=False,
@@ -433,6 +455,68 @@ class Store:
             self._workspace_github.pop(name, None)
             self._persist()
             return existed
+
+    def get_workspace_retention(self, workspace: str) -> int:
+        """Return the stored per-workspace scan limit, or ``0`` when unset."""
+        name = self._check_workspace(workspace)
+        with self._lock:
+            return int(self._workspace_retention.get(name, 0))
+
+    def set_workspace_retention(self, workspace: str, max_scans: Any) -> Dict[str, Any]:
+        """Store the per-workspace retention limit; ``0`` clears it.
+
+        Raises :class:`ValueError` for a non-integer or out-of-range value.
+        """
+        name = self._check_workspace(workspace)
+        if isinstance(max_scans, bool) or not isinstance(max_scans, int):
+            raise ValueError("invalid retention limit")
+        if max_scans < 0 or max_scans > MAX_RETENTION_SCANS:
+            raise ValueError("invalid retention limit")
+        with self._lock:
+            if max_scans == 0:
+                self._workspace_retention.pop(name, None)
+            else:
+                self._workspace_retention[name] = max_scans
+            self._persist()
+            return {"workspace": name, "max_scans": max_scans}
+
+    def delete_workspace_retention(self, workspace: str) -> bool:
+        name = self._check_workspace(workspace)
+        with self._lock:
+            existed = name in self._workspace_retention
+            self._workspace_retention.pop(name, None)
+            self._persist()
+            return existed
+
+    def prune_workspace_scans(self, workspace: str, max_scans: Any) -> int:
+        """Delete the oldest scans of ``workspace`` beyond ``max_scans``.
+
+        Scans of other workspaces and scans without a workspace are never
+        touched. A limit of ``0`` (the unset policy) is a no-op. Returns the
+        number of deleted scans, so calling it again with nothing to prune
+        returns ``0``.
+        """
+        name = self._check_workspace(workspace)
+        if isinstance(max_scans, bool) or not isinstance(max_scans, int):
+            raise ValueError("invalid retention limit")
+        if max_scans < 0 or max_scans > MAX_RETENTION_SCANS:
+            raise ValueError("invalid retention limit")
+        if max_scans == 0:
+            return 0
+        with self._lock:
+            relevant = [
+                (str(scan.get("created_at", "")), index, scan_id)
+                for index, (scan_id, scan) in enumerate(self._scans.items())
+                if scan.get("workspace") == name
+            ]
+            if len(relevant) <= max_scans:
+                return 0
+            relevant.sort()
+            to_delete = relevant[: len(relevant) - max_scans]
+            for _, _, scan_id in to_delete:
+                del self._scans[scan_id]
+            self._persist()
+            return len(to_delete)
 
     def get_workspace_schedule(self, workspace: str) -> Dict[str, Any]:
         """Return the stored schedule for ``workspace`` or a disabled default."""
