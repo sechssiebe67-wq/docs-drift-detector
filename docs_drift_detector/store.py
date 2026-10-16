@@ -15,12 +15,14 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 from . import analyze
 
 _WORKSPACE_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 MAX_RULE_HISTORY = 20
+MAX_WEBHOOK_URL = 500
 _RULE_HISTORY_ACTIONS = ("set", "import", "clear", "promote")
 
 
@@ -30,6 +32,27 @@ def _utc_now() -> str:
 
 def _valid_workspace(workspace: Any) -> bool:
     return bool(_WORKSPACE_RE.match(str(workspace or "")))
+
+
+def _validate_webhook_url(url: Any) -> str:
+    """Return the normalised webhook URL, or ``""`` when it should be cleared.
+
+    A non-empty URL must be an ``http``/``https`` URL of at most
+    ``MAX_WEBHOOK_URL`` characters; anything else raises :class:`ValueError`.
+    """
+    if url is None:
+        raise ValueError("invalid webhook url")
+    if not isinstance(url, str):
+        raise ValueError("invalid webhook url")
+    url = url.strip()
+    if not url:
+        return ""
+    if len(url) > MAX_WEBHOOK_URL:
+        raise ValueError("webhook url too long")
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError("webhook url must be http or https")
+    return url
 
 
 def _normalise_history_entry(entry: Any) -> Optional[Dict[str, Any]]:
@@ -65,6 +88,7 @@ class Store:
         self._scans: Dict[str, Dict[str, Any]] = {}
         self._workspace_rules: Dict[str, List[Dict[str, str]]] = {}
         self._workspace_rule_history: Dict[str, List[Dict[str, Any]]] = {}
+        self._workspace_webhooks: Dict[str, str] = {}
         self._load()
 
     def _load(self) -> None:
@@ -108,6 +132,19 @@ class Store:
                 entries.sort(key=lambda item: item["revision"])
                 loaded_history[workspace] = entries
             self._workspace_rule_history = loaded_history
+        webhooks = data.get("workspace_webhooks")
+        if isinstance(webhooks, dict):
+            loaded_webhooks: Dict[str, str] = {}
+            for workspace, url in webhooks.items():
+                if not isinstance(workspace, str) or not _valid_workspace(workspace):
+                    continue
+                try:
+                    normalised = _validate_webhook_url(url)
+                except ValueError:
+                    continue
+                if normalised:
+                    loaded_webhooks[workspace] = normalised
+            self._workspace_webhooks = loaded_webhooks
 
     def _persist(self) -> None:
         directory = os.path.dirname(os.path.abspath(self.path))
@@ -120,6 +157,7 @@ class Store:
                         "scans": self._scans,
                         "workspace_rules": self._workspace_rules,
                         "workspace_rule_history": self._workspace_rule_history,
+                        "workspace_webhooks": self._workspace_webhooks,
                     },
                     handle,
                     ensure_ascii=False,
@@ -207,6 +245,30 @@ class Store:
                     self._persist()
                     return copy.deepcopy(normalised)
             return None
+
+    def get_workspace_webhook(self, workspace: str) -> Dict[str, str]:
+        name = self._check_workspace(workspace)
+        with self._lock:
+            return {"url": self._workspace_webhooks.get(name, "")}
+
+    def set_workspace_webhook(self, workspace: str, url: Any) -> Dict[str, str]:
+        name = self._check_workspace(workspace)
+        normalised = _validate_webhook_url(url)
+        with self._lock:
+            if normalised:
+                self._workspace_webhooks[name] = normalised
+            else:
+                self._workspace_webhooks.pop(name, None)
+            self._persist()
+            return {"url": normalised}
+
+    def delete_workspace_webhook(self, workspace: str) -> bool:
+        name = self._check_workspace(workspace)
+        with self._lock:
+            existed = name in self._workspace_webhooks
+            self._workspace_webhooks.pop(name, None)
+            self._persist()
+            return existed
 
     def create_scan(
         self,

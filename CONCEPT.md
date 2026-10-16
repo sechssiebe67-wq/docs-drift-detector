@@ -96,6 +96,17 @@ manual review marathon.
   new_value, score, severity}` sorted by descending score then page then id, so a
   documentation lead can see *what* a rule hid, not only *how many* items it hid.
   The web UI expands these findings inline beneath the provenance table.
+- **Per-workspace outbound webhook.** A webhook URL can be registered once per
+  workspace (`GET`/`PUT`/`DELETE /api/workspaces/{ws}/webhook`; empty URL
+  clears). After every stored scan for that workspace succeeds, the service
+  POSTs a JSON payload describing the scan and its **high-severity findings
+  only** (sorted by descending score) to the configured URL via
+  `notify.build_payload` and `notify.dispatch`. Delivery is best-effort: a
+  single plain `urllib.request` POST with `content-type: application/json`,
+  no retry queue and no HMAC signing, so a missing or failing endpoint is
+  logged to stderr and never blocks or changes the scan response. The config
+  is stored in the same JSON file under `workspace_webhooks` and reloading
+  tolerates a missing or malformed key.
 - **Operational endpoints.** `GET /healthz` plus a stateless JSON API.
 
 ## Differentiation
@@ -107,10 +118,11 @@ release-to-docs comparison with text and screenshot matching.
 
 ## Next direction
 
-- Build on the per-rule suppression drill-down endpoint (shipped in this
-  repository as `GET /api/scans/{id}/suppressed`) to power the planned outbound
-  webhook / pull-request suggestion for the documentation repo.
-- Optional outbound webhook / pull-request suggestion for the documentation repo.
+- The outbound-notification item is half shipped: the configurable per-workspace
+  webhook now notifies a Slack/Teams/CI endpoint about high-severity findings
+  once per stored scan. The remaining step is the **pull-request suggestion** for
+  the documentation repository (open a branch/PR with the exported checklist),
+  which should reuse the same payload and high-severity scope.
 - Screenshot diffing with per-region highlighting instead of change signals.
 - Pluggable connectors for GitHub commit ranges and rendered docs sites.
 - Per-workspace repositories and doc-page quotas for the tiered SaaS plan.
@@ -123,6 +135,9 @@ release-to-docs comparison with text and screenshot matching.
   full visual diff engine, so cosmetic layout changes must be filtered upstream.
 - Matching is lexical; heavily paraphrased documentation must still be reviewed
   by a human.
+- Webhook delivery is best-effort with no retry queue, so a scan is never
+  delayed or failed by a webhook. Delivery is plain HTTP POST with no HMAC
+  signing yet, so receivers should treat the endpoint as untrusted.
 - The tool recommends work; it does not autonomously edit documentation.
 
 ## Revenue hypothesis

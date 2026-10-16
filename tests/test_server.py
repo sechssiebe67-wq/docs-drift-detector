@@ -9,6 +9,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from docs_drift_detector import notify  # noqa: E402
 from docs_drift_detector.server import create_server  # noqa: E402
 from docs_drift_detector.store import Store  # noqa: E402
 
@@ -551,6 +552,130 @@ class ServerTest(unittest.TestCase):
             "POST", "/api/workspaces/wsBadRev/rules/history/notanint/promote"
         )
         self.assertEqual(status, 400)
+
+    def test_workspace_webhook_lifecycle(self):
+        ws = "wsWebhookLife"
+        status, payload = self._json("GET", "/api/workspaces/%s/webhook" % ws)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {"workspace": ws, "url": ""})
+
+        status, payload = self._json(
+            "PUT",
+            "/api/workspaces/%s/webhook" % ws,
+            {"url": "https://hooks.example.com/ddr"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["url"], "https://hooks.example.com/ddr")
+
+        status, payload = self._json("GET", "/api/workspaces/%s/webhook" % ws)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {"workspace": ws, "url": "https://hooks.example.com/ddr"})
+
+        status, payload = self._json("DELETE", "/api/workspaces/%s/webhook" % ws)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {"deleted": ws})
+
+        status, payload = self._json("GET", "/api/workspaces/%s/webhook" % ws)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["url"], "")
+
+    def test_workspace_webhook_invalid_url_returns_400(self):
+        ws = "wsWebhookBad"
+        for bad in ("ftp://x", "https://" + "a" * 500, "not-a-url"):
+            status, payload = self._json(
+                "PUT", "/api/workspaces/%s/webhook" % ws, {"url": bad}
+            )
+            self.assertEqual(status, 400, bad)
+            self.assertIn("error", payload)
+
+    def test_workspace_webhook_missing_url_returns_400(self):
+        status, _ = self._json("PUT", "/api/workspaces/wsWebhookMissing/webhook", {})
+        self.assertEqual(status, 400)
+
+    def test_workspace_webhook_empty_clears(self):
+        ws = "wsWebhookClear"
+        self._json(
+            "PUT", "/api/workspaces/%s/webhook" % ws, {"url": "https://hooks.example.com/x"}
+        )
+        status, payload = self._json("PUT", "/api/workspaces/%s/webhook" % ws, {"url": ""})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["url"], "")
+        status, payload = self._json("GET", "/api/workspaces/%s/webhook" % ws)
+        self.assertEqual(payload["url"], "")
+
+    def test_workspace_webhook_invalid_id_returns_400(self):
+        status, _ = self._json("GET", "/api/workspaces/bad%20id!/webhook")
+        self.assertEqual(status, 400)
+        status, _ = self._json(
+            "PUT", "/api/workspaces/bad%20id!/webhook", {"url": "https://x.example"}
+        )
+        self.assertEqual(status, 400)
+        status, _ = self._json("DELETE", "/api/workspaces/bad%20id!/webhook")
+        self.assertEqual(status, 400)
+
+    def test_workspace_webhook_survives_store_reload(self):
+        ws = "wsWebhookDisk"
+        self._json(
+            "PUT", "/api/workspaces/%s/webhook" % ws, {"url": "https://hooks.example.com/ddr"}
+        )
+        reopened = Store(os.path.join(self.tmp.name, "scans.json"))
+        self.assertEqual(
+            reopened.get_workspace_webhook(ws)["url"], "https://hooks.example.com/ddr"
+        )
+
+    def test_scan_dispatches_high_severity_payload(self):
+        ws = "wsWebhookPayload"
+        self._json(
+            "PUT", "/api/workspaces/%s/webhook" % ws, {"url": "https://hooks.example.com/x"}
+        )
+        captured = {}
+        original = notify.dispatch
+
+        def fake_dispatch(url, payload, timeout=5):
+            captured["url"] = url
+            captured["payload"] = payload
+            return {"ok": True, "status": 200, "error": ""}
+
+        notify.dispatch = fake_dispatch
+        try:
+            body = {
+                "name": "Hook payload",
+                "workspace": ws,
+                "changelog": 'renamed "Save" to "Save changes"\n"/settings" -> "/account/settings"',
+                "pages": [{"path": "help/a.md", "content": "Click Save. Go to /settings."}],
+                "metrics": {"help/a.md": {"views": 100000, "tickets": 5}},
+            }
+            status, scan = self._json("POST", "/api/scans", body)
+        finally:
+            notify.dispatch = original
+        self.addCleanup(self._json, "DELETE", "/api/scans/%s" % scan["id"])
+
+        self.assertEqual(status, 201)
+        self.assertEqual(captured["url"], "https://hooks.example.com/x")
+        payload = captured["payload"]
+        self.assertEqual(payload["scan_id"], scan["id"])
+        self.assertEqual(payload["workspace"], ws)
+        self.assertTrue(payload["findings"])
+        self.assertEqual({f["severity"] for f in payload["findings"]}, {"high"})
+        scores = [f["score"] for f in payload["findings"]]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+
+    def test_scan_with_unreachable_webhook_still_returns_201(self):
+        ws = "wsWebhookDown"
+        self._json(
+            "PUT", "/api/workspaces/%s/webhook" % ws, {"url": "http://127.0.0.1:1/nope"}
+        )
+        body = {
+            "name": "Hook down",
+            "workspace": ws,
+            "changelog": 'renamed "Save" to "Save changes"',
+            "pages": [{"path": "help/a.md", "content": "Click Save."}],
+        }
+        status, scan = self._json("POST", "/api/scans", body)
+        self.addCleanup(self._json, "DELETE", "/api/scans/%s" % scan["id"])
+        self.assertEqual(status, 201)
+        self.assertEqual(scan["name"], "Hook down")
+        self.assertEqual(scan["stats"]["findings"], 1)
 
 
 if __name__ == "__main__":

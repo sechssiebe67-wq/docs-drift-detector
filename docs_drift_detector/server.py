@@ -9,7 +9,7 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import analyze, export
+from . import analyze, export, notify
 from .store import Store
 
 MAX_BODY = 8 * 1024 * 1024
@@ -107,6 +107,11 @@ class Handler(BaseHTTPRequestHandler):
             if not _valid_id(parts[2]):
                 return self._error(400, "invalid workspace id")
             return self._json(200, {"rules": self.server.store.list_workspace_rules(parts[2])})
+        if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "webhook":
+            if not _valid_id(parts[2]):
+                return self._error(400, "invalid workspace id")
+            config = self.server.store.get_workspace_webhook(parts[2])
+            return self._json(200, {"workspace": parts[2], "url": config.get("url", "")})
         if (
             len(parts) == 5
             and parts[:2] == ["api", "workspaces"]
@@ -277,6 +282,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, "invalid workspace id")
             rules = self.server.store.set_workspace_rules(parts[2], data.get("rules"))
             return self._json(200, {"rules": rules})
+        if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "webhook":
+            if not _valid_id(parts[2]):
+                return self._error(400, "invalid workspace id")
+            if "url" not in data:
+                return self._error(400, "invalid webhook url")
+            try:
+                stored = self.server.store.set_workspace_webhook(parts[2], data.get("url"))
+            except ValueError:
+                return self._error(400, "invalid webhook url")
+            return self._json(200, {"workspace": parts[2], "url": stored.get("url", "")})
         return self._error(404, "not found")
 
     def do_DELETE(self) -> None:  # noqa: N802
@@ -286,6 +301,11 @@ class Handler(BaseHTTPRequestHandler):
             if not _valid_id(parts[2]):
                 return self._error(400, "invalid workspace id")
             self.server.store.delete_workspace_rules(parts[2])
+            return self._json(200, {"deleted": parts[2]})
+        if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "webhook":
+            if not _valid_id(parts[2]):
+                return self._error(400, "invalid workspace id")
+            self.server.store.delete_workspace_webhook(parts[2])
             return self._json(200, {"deleted": parts[2]})
         if len(parts) == 3 and parts[:2] == ["api", "scans"] and _valid_id(parts[2]):
             if self.server.store.delete_scan(parts[2]):
@@ -389,7 +409,31 @@ class Handler(BaseHTTPRequestHandler):
             suppressed_rules=extra["suppressed_rules"],
             suppressed_details=extra["suppressed_details"],
         )
+        self._notify_webhook(scan)
         return self._json(201, scan)
+
+    def _notify_webhook(self, scan: Dict[str, Any]) -> None:
+        """Best-effort outbound webhook dispatch for a stored scan.
+
+        Delivery never raises and never changes the scan response; failures are
+        written to stderr only.
+        """
+        workspace = scan.get("workspace")
+        if not workspace:
+            return
+        try:
+            config = self.server.store.get_workspace_webhook(workspace)
+            url = config.get("url") or ""
+            if not url:
+                return
+            result = notify.dispatch(url, notify.build_payload(scan))
+            if not result.get("ok"):
+                sys.stderr.write(
+                    "docs-drift: webhook delivery failed (workspace=%s, url=%s): %s\n"
+                    % (workspace, url, result.get("error") or result.get("status"))
+                )
+        except Exception as err:  # never let notification break the response
+            sys.stderr.write("docs-drift: webhook dispatch error: %s\n" % err)
 
     def _resolve(self, scan_id: str, finding_id: str, data: Dict[str, Any]) -> None:
         resolved = bool(data.get("resolved", True))
