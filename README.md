@@ -51,6 +51,7 @@ Open <http://localhost:8080>. The service exposes:
 - `GET  /api/schedule/status` — scheduler status (`enabled`, `tick_seconds`, `due`, `schedules`).
 - `GET  /api/workspaces/{ws}/digests` — recent scheduled-scan digests for a workspace, newest first (`limit` optional, default `10`).
 - `GET  /api/workspaces/{ws}/trend` — chronological drift trend across a workspace's recent scans (`limit` optional, default `10`, max `50`).
+- `GET  /api/trend` — cross-workspace drift roll-up across the recent scans of all workspaces (`limit` optional, default `10`, max `50`).
 
 ### Scan request body
 
@@ -527,6 +528,107 @@ curl -sS 'localhost:8080/api/workspaces/ws1/trend?limit=5' | python3 -m json.too
 - The trend is bounded and workspace-keyed only: there is no pagination, no
   cross-workspace or global trend, and no time-based bucketing beyond scan
   order. The scans live in the single JSON store.
+
+### Cross-workspace drift roll-up
+
+Where the per-workspace trend answers "is *this* workspace getting better or
+worse?", `GET /api/trend` gives a portfolio-level view by aggregating the recent
+stored scans of **all** workspaces (plus scans with no workspace, grouped under
+the empty-string bucket) into a single chronological window. It is read-only: it
+reuses the stored scans and never mutates the store or dispatches a webhook,
+opens a pull request or records a digest.
+
+```sh
+curl -sS 'localhost:8080/api/trend?limit=5' | python3 -m json.tool
+```
+
+`GET /api/trend` returns HTTP 200 with:
+
+```json
+{
+  "scans": [
+    {
+      "scan_id": "a1b2c3d4e5f6",
+      "workspace": "ws1",
+      "created_at": "2026-01-01T12:00:00+00:00",
+      "name": "Release 4.2",
+      "total_findings": 3,
+      "by_severity": {"high": 1, "medium": 1, "low": 1},
+      "open_findings": 2,
+      "high_open": 1,
+      "suppressed": 0
+    },
+    {
+      "scan_id": "b2c3d4e5f6a1",
+      "workspace": "ws2",
+      "created_at": "2026-01-02T12:00:00+00:00",
+      "name": "Release 4.3",
+      "total_findings": 2,
+      "by_severity": {"high": 2, "medium": 0, "low": 0},
+      "open_findings": 2,
+      "high_open": 2,
+      "suppressed": 0
+    }
+  ],
+  "workspaces": [
+    {
+      "workspace": "ws2",
+      "scans": 1,
+      "total_findings": 2,
+      "by_severity": {"high": 2, "medium": 0, "low": 0},
+      "open_findings": 2,
+      "high_open": 2,
+      "suppressed": 0,
+      "delta_high": 0
+    },
+    {
+      "workspace": "ws1",
+      "scans": 1,
+      "total_findings": 3,
+      "by_severity": {"high": 1, "medium": 1, "low": 1},
+      "open_findings": 2,
+      "high_open": 1,
+      "suppressed": 0,
+      "delta_high": 0
+    }
+  ],
+  "summary": {
+    "scans": 2,
+    "workspaces": 2,
+    "total_findings": 5,
+    "by_severity": {"high": 3, "medium": 1, "low": 1},
+    "open_findings": 4,
+    "high_open": 3,
+    "suppressed": 0,
+    "delta_high": 1
+  }
+}
+```
+
+- `scans` holds the window **oldest-first** and each entry adds `workspace`
+  (empty string when the scan has none) to the exact same per-scan summary that
+  `GET /api/workspaces/{ws}/trend` reports, so the two endpoints agree on
+  `total_findings`, `by_severity`, `open_findings`, `high_open` and
+  `suppressed` for a given scan.
+- `workspaces` aggregates the window per workspace, sorted by descending
+  `high_open` then workspace name. Each entry's `delta_high` is
+  `newest.high_open - oldest.high_open` within that workspace's window (`0`
+  when the window holds fewer than two scans for it); a negative value means the
+  newest scan has fewer open high-severity findings than the oldest.
+- `summary` aggregates the whole window (`scans`, `workspaces`,
+  `total_findings`, `by_severity`, `open_findings`, `high_open`, `suppressed`)
+  and adds `delta_high = newest.high_open - oldest.high_open` across the window
+  (`0` when fewer than two scans are in the window). `summary.total_findings`
+  equals the sum of the per-workspace `total_findings`.
+- The optional `limit` query parameter is an integer (default `10`) clamped into
+  `1..50`; a non-integer such as `limit=abc` returns HTTP 400.
+- Malformed stored scans (a non-dict entry, or one with a missing/invalid `id`
+  or `created_at`) are skipped without changing the HTTP status. On an empty
+  store the response is HTTP 200 with empty `scans` and `workspaces` and a
+  zeroed `summary`.
+- The roll-up is bounded and keyed by workspace only: one chronological window
+  in scan order rather than time buckets, with no pagination or date-range
+  filtering. The scans live in the single JSON store.
 
 ### Pull-request suggestion
 

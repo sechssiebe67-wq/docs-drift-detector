@@ -716,6 +716,24 @@ class Store:
                     latest = scan
             return copy.deepcopy(latest) if latest is not None else None
 
+    def list_all_scans(self) -> List[Dict[str, Any]]:
+        """Return every stored scan as a full deep copy, newest-first.
+
+        Unlike :meth:`list_scans` (a summary used by ``GET /api/scans``) this
+        keeps each scan's full document, so the cross-workspace roll-up can
+        summarise findings exactly like the per-workspace trend. Ordering uses
+        ``(created_at, insertion index)`` descending so scans created in the
+        same second keep a deterministic newest-first order.
+        """
+        with self._lock:
+            relevant = [
+                (str(scan.get("created_at", "")), index, scan)
+                for index, scan in enumerate(self._scans.values())
+                if isinstance(scan, dict)
+            ]
+        relevant.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return [copy.deepcopy(scan) for _, _, scan in relevant]
+
     def list_workspace_scans(self, workspace: str) -> List[Dict[str, Any]]:
         """Return the workspace's stored scans, newest-first.
 
@@ -724,14 +742,11 @@ class Store:
         the same second keep a deterministic newest-first order.
         """
         name = self._check_workspace(workspace)
-        with self._lock:
-            relevant = [
-                (str(scan.get("created_at", "")), index, scan)
-                for index, scan in enumerate(self._scans.values())
-                if isinstance(scan, dict) and scan.get("workspace") == name
-            ]
-        relevant.sort(key=lambda item: (item[0], item[1]), reverse=True)
-        return [copy.deepcopy(scan) for _, _, scan in relevant]
+        return [
+            scan
+            for scan in self.list_all_scans()
+            if scan.get("workspace") == name
+        ]
 
     def create_scan(
         self,

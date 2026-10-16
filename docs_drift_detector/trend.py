@@ -40,8 +40,16 @@ def _zero_severity() -> Dict[str, int]:
     return {"high": 0, "medium": 0, "low": 0}
 
 
-def _entry(scan: Any) -> Dict[str, Any]:
-    """Normalise one stored scan into a trend point, tolerating malformed data."""
+def summarise_scan(scan: Any) -> Dict[str, Any]:
+    """Normalise one stored scan into a trend/roll-up point.
+
+    This is the shared per-scan summarisation used by both the per-workspace
+    trend (:func:`build_trend`) and the cross-workspace roll-up
+    (``docs_drift_detector.rollup.build_rollup``), so both endpoints report the
+    same ``total_findings``/``by_severity``/``open_findings``/``high_open``/
+    ``suppressed`` for a given scan. Malformed values are tolerated and
+    defaulted rather than raising.
+    """
     scan = scan if isinstance(scan, dict) else {}
     raw_findings = scan.get("findings")
     findings = (
@@ -123,7 +131,7 @@ def build_trend(store: Any, workspace: str, limit: int = DEFAULT_LIMIT) -> Dict[
     if not isinstance(scans, list):
         scans = []
     recent = [scan for scan in scans if isinstance(scan, dict)][:bounded]
-    entries = [_entry(scan) for scan in reversed(recent)]
+    entries = [summarise_scan(scan) for scan in reversed(recent)]
     return {
         "workspace": workspace,
         "scans": entries,

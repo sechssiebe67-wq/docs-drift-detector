@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import analyze, export, github, pullrequest, runner, trend
+from . import analyze, export, github, pullrequest, rollup, runner, trend
 from .store import (
     DEFAULT_GITHUB_TOKEN_ENV,
     MAX_DIGEST_HISTORY,
@@ -234,6 +234,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, "invalid workspace id")
             history = self.server.store.list_workspace_rule_history(parts[2])
             return self._json(200, {"workspace": parts[2], "history": history})
+        if parts == ["api", "trend"]:
+            query = urllib.parse.parse_qs(
+                urllib.parse.urlparse(self.path).query, keep_blank_values=True
+            )
+            limit = rollup.DEFAULT_LIMIT
+            if "limit" in query:
+                try:
+                    limit = int(query["limit"][0])
+                except (TypeError, ValueError):
+                    return self._error(400, "invalid limit")
+            scans = self.server.store.list_all_scans()
+            return self._json(200, rollup.build_rollup(scans, limit))
         if parts == ["api", "scans"]:
             return self._json(200, {"scans": self.server.store.list_scans()})
         if len(parts) == 4 and parts[:2] == ["api", "scans"] and parts[3] == "suppressed":

@@ -170,12 +170,29 @@ manual review marathon.
   (`high`/`medium`/`low`), `open_findings`, `high_open` and `suppressed`, and
   `summary` aggregates the window (`scans`, `total_findings`, `by_severity`,
   `open_findings`, `high_open`, `suppressed`) plus `delta_high`
-  (`newest.high_open - oldest.high_open`, `0` when fewer than two scans are in
-  the window). The window is bounded and workspace-keyed, the endpoint is
-  strictly read-only (never mutates the store, dispatches a webhook, opens a
-  pull request or records a digest), and malformed stored scans are skipped
-  rather than raising. This lets a team answer "are we getting better or worse
-  at keeping docs in sync?" without exporting scans one by one.
+   (`newest.high_open - oldest.high_open`, `0` when fewer than two scans are in
+   the window). The window is bounded and workspace-keyed, the endpoint is
+   strictly read-only (never mutates the store, dispatches a webhook, opens a
+   pull request or records a digest), and malformed stored scans are skipped
+   rather than raising. This lets a team answer "are we getting better or worse
+   at keeping docs in sync?" without exporting scans one by one.
+- **Cross-workspace drift roll-up.** `GET /api/trend` gives a documentation
+  lead a portfolio-level view of drift by aggregating the recent stored scans of
+  *all* workspaces (plus scans with no workspace, grouped under the empty-string
+  bucket) into one chronological window (optional integer `limit`, default `10`,
+  clamped to `1..50`). The response is `{"scans", "workspaces", "summary"}` where
+  `scans` holds the window oldest-first, each entry adding the scan's
+  `workspace` to the same per-scan summary the per-workspace trend reports;
+  `workspaces` is a per-workspace aggregate sorted by descending `high_open`
+  then workspace name, each carrying `workspace`, `scans`, `total_findings`,
+  `by_severity`, `open_findings`, `high_open`, `suppressed` and `delta_high`
+  (newest minus oldest `high_open` within that workspace's window, `0` when
+  fewer than two scans); and `summary` aggregates the whole window plus its own
+  `delta_high`. The endpoint is strictly read-only (never mutates the store,
+  dispatches a webhook, opens a pull request or records a digest), reuses the
+  store's scan listing so it sees every stored scan rather than one workspace,
+  and skips malformed scans (`id`/`created_at` missing or invalid) rather than
+  raising.
 - **Per-workspace scan retention.** A workspace can cap how many stored scans it
   keeps (`GET`/`PUT`/`DELETE /api/workspaces/{ws}/retention`, with
   `max_scans` in `0..10000`; `0` clears the policy and an unset workspace
@@ -206,11 +223,12 @@ release-to-docs comparison with text and screenshot matching.
   checklist with the same high-severity scope. The **per-workspace scan
   retention** policy now caps unbounded store growth by pruning the oldest scans
   after each stored scan, and the **per-workspace digest history** now makes
-  scheduled digests auditable after the fact. A basic per-workspace **drift
-  trend** view now ships (`GET /api/workspaces/{ws}/trend`), so the remaining
-  trend gap is a cross-workspace/global roll-up and time-based bucketing rather
-  than scan order. What remains is broader connector coverage and making
-  repositories first-class per-workspace objects.
+  scheduled digests auditable after the fact. A per-workspace **drift trend**
+  view now ships (`GET /api/workspaces/{ws}/trend`), and the cross-workspace
+  **drift roll-up** now closes the portfolio gap (`GET /api/trend`), so the
+  remaining trend gap is time-based bucketing rather than scan order. What
+  remains is broader connector coverage and making repositories first-class
+  per-workspace objects.
 - Screenshot diffing with per-region highlighting instead of change signals.
 - Pluggable connectors for GitHub commit ranges and rendered docs sites.
 - Per-workspace repositories and doc-page quotas for the tiered SaaS plan.
@@ -251,6 +269,12 @@ release-to-docs comparison with text and screenshot matching.
   keyed by workspace only: it reads the single JSON store, presents scans in
   scan order rather than time buckets, has no pagination, and offers no
   cross-workspace or global trend.
+- The cross-workspace drift roll-up (`GET /api/trend`) is bounded (`limit`
+  clamped to `1..50`, default `10`) and keyed by workspace: it reads the single
+  JSON store, presents one chronological window in scan order rather than time
+  buckets, has no pagination, date-range or per-severity filtering, and the
+  `workspaces` aggregate grows with the number of distinct workspaces in the
+  window (scans without a workspace appear under the empty-string bucket).
 
 ## Revenue hypothesis
 
