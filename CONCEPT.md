@@ -11,9 +11,10 @@ checkable list of the documentation sections that most likely need an update.
 It is intentionally a *release-to-docs* tool. It is not a feedback inbox and it
 does not require customer tickets to work; it derives documentation work directly
 from what shipped. The goal has not changed: the drift trend views (per-workspace,
-cross-workspace, time-bucketed and their CSV exports) are a **read-only reporting
-layer on top of** the release-to-docs core — they summarise already-stored scans
-for reporting and never alter findings, the store or the release-to-docs flow.
+cross-workspace, time-bucketed and their CSV/JSONL exports) are a **read-only
+reporting layer on top of** the release-to-docs core — they summarise
+already-stored scans for reporting and never alter findings, the store or the
+release-to-docs flow.
 
 ## Intended users
 
@@ -302,6 +303,35 @@ manual review marathon.
   (never mutate the store, dispatch a webhook, open a pull request or record a
   digest), and the CSV rendering lives in the standard-library-only
   `docs_drift_detector/csv_export.py` (`to_csv(document, kind)`).
+- **JSONL export of the time-bucketed drift trend.** The two time-bucketed
+  endpoints can also be downloaded as newline-delimited JSON instead of JSON or
+  CSV through `GET /api/workspaces/{ws}/trend/buckets.jsonl` and
+  `GET /api/trend/buckets.jsonl`, so a documentation lead can stream the weekly
+  numbers into a data warehouse, a log pipeline or a notebook that reads
+  line-delimited records, one self-contained object per line. Both accept the
+  exact same optional query parameters as their JSON/CSV siblings (`bucket`,
+  `limit`, `from`/`to`, `cursor`) and stream
+  `Content-Type: application/x-ndjson; charset=utf-8` with a
+  `Content-Disposition: attachment` filename
+  (`docs-drift-<ws>-trend-buckets.jsonl` / `docs-drift-trend-buckets.jsonl`,
+  matching the CSV routes). Each line is a single JSON object
+  (`json.dumps(..., ensure_ascii=False, sort_keys=True)`) terminated by `\n`,
+  with a trailing newline after the last line: `kind="workspace"` emits one line
+  per bucket, while `kind="rollup"` emits one line per bucket per workspace and
+  still emits exactly one line with an empty `workspace` when a bucket has no
+  workspace breakdown. Every line's aggregate fields (`scans`, `total_findings`,
+  `by_severity`, `open_findings`, `high_open`, `suppressed`) match the
+  corresponding entry in the JSON response for the same query parameters because
+  the export reuses `buckets.build_workspace_buckets` /
+  `buckets.build_rollup_buckets` output rather than recomputing anything. Both
+  endpoints are strictly read-only (never mutate the store, dispatch a webhook,
+  open a pull request or record a digest) with the same malformed-scan skipping,
+  the same invalid `bucket`/`limit`/`from`/`to`/`cursor` `400` behaviour and the
+  same `limit` clamping to `1..50` as the JSON siblings; a well-formed but
+  unknown workspace returns HTTP 200 with an empty body. The rendering lives
+  alongside the CSV export in the standard-library-only
+  `docs_drift_detector/csv_export.py` (`to_jsonl(document, kind)`, which raises
+  `ValueError` for an unknown `kind`).
 - **Per-workspace scan retention.** A workspace can cap how many stored scans it
   keeps (`GET`/`PUT`/`DELETE /api/workspaces/{ws}/retention`, with
   `max_scans` in `0..10000`; `0` clears the policy and an unset workspace
@@ -343,11 +373,15 @@ release-to-docs comparison with text and screenshot matching.
   the **CSV export** of the two time-bucketed endpoints
   (`GET /api/workspaces/{ws}/trend/buckets.csv`,
   `GET /api/trend/buckets.csv`) now turns that trend into a spreadsheet-ready
-  attachment. The remaining trend gaps are time-zone-aware bucketing (buckets
-  are always UTC), a `month` (or larger) bucket, per-severity filtering and a
-  JSON/CSV export of the *scan-order* trend (only the two bucketed endpoints
-  export today); broader connector coverage and making repositories first-class
-  per-workspace objects remain as well.
+  attachment. The matching **JSONL export**
+  (`GET /api/workspaces/{ws}/trend/buckets.jsonl`,
+  `GET /api/trend/buckets.jsonl`) now streams the same time-bucketed documents
+  one JSON object per line for a warehouse/log/notebook pipeline. The remaining
+  trend gaps are time-zone-aware bucketing (buckets are always UTC), a `month`
+  (or larger) bucket, per-severity filtering and a JSON/CSV/JSONL export of the
+  *scan-order* trend (only the two bucketed endpoints export today); broader
+  connector coverage and making repositories first-class per-workspace objects
+  remain as well.
 - Screenshot diffing with per-region highlighting instead of change signals.
 - Pluggable connectors for GitHub commit ranges and rendered docs sites.
 - Per-workspace repositories and doc-page quotas for the tiered SaaS plan.
@@ -415,10 +449,11 @@ release-to-docs comparison with text and screenshot matching.
   record a digest. Their `bucket`/`limit` bounds, `from`/`to` window and optional
   `cursor` above are the only inputs, and an unsupported `bucket` value, a
   non-integer `limit`, a malformed `from`/`to` or a malformed `cursor` is
-  rejected with HTTP 400 rather than silently defaulted. Their CSV siblings
-  (`.../trend/buckets.csv`) share every one of these limits exactly, differing
-  only in the response media type; only the two time-bucketed endpoints have a
-  CSV form, so the scan-order trend and roll-up are still JSON-only.
+  rejected with HTTP 400 rather than silently defaulted. Their CSV and JSONL
+  siblings (`.../trend/buckets.csv`, `.../trend/buckets.jsonl`) share every one
+  of these limits exactly, differing only in the response media type; only the
+  two time-bucketed endpoints have a CSV/JSONL form, so the scan-order trend and
+  roll-up are still JSON-only.
 
 ## Revenue hypothesis
 
