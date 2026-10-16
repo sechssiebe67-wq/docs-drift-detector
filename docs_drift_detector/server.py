@@ -11,8 +11,9 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import analyze, export, pullrequest, runner
+from . import analyze, export, github, pullrequest, runner
 from .store import (
+    DEFAULT_GITHUB_TOKEN_ENV,
     MAX_SCHEDULE_HOURS,
     MIN_SCHEDULE_HOURS,
     Store,
@@ -154,6 +155,10 @@ class Handler(BaseHTTPRequestHandler):
             if not _valid_id(parts[2]):
                 return self._error(400, "invalid workspace id")
             return self._json(200, self.server.store.get_workspace_schedule(parts[2]))
+        if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "github":
+            if not _valid_id(parts[2]):
+                return self._error(400, "invalid workspace id")
+            return self._json(200, self.server.store.get_workspace_github(parts[2]))
         if parts == ["api", "schedule", "status"]:
             return self._schedule_status()
         if (
@@ -295,6 +300,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(404, "revision not found")
             return self._json(200, {"rules": restored, "promoted": revision})
 
+        if (
+            len(parts) == 5
+            and parts[:2] == ["api", "scans"]
+            and parts[3] == "pull-request"
+            and parts[4] == "open"
+        ):
+            if not _valid_id(parts[2]):
+                return self._error(400, "invalid scan id")
+            scan = self.server.store.get_scan(parts[2])
+            if scan is None:
+                return self._error(404, "scan not found")
+            return self._open_pull_request(scan)
+
         data = self._read_json()
         if data is None:
             return self._error(400, "invalid or missing JSON body")
@@ -363,6 +381,16 @@ class Handler(BaseHTTPRequestHandler):
             if not _valid_id(parts[2]):
                 return self._error(400, "invalid workspace id")
             return self._put_schedule(parts[2], data)
+        if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "github":
+            if not _valid_id(parts[2]):
+                return self._error(400, "invalid workspace id")
+            if "repo" not in data:
+                return self._error(400, "invalid github config")
+            try:
+                stored = self.server.store.set_workspace_github(parts[2], data)
+            except ValueError:
+                return self._error(400, "invalid github config")
+            return self._json(200, stored)
         return self._error(404, "not found")
 
     def do_DELETE(self) -> None:  # noqa: N802
@@ -382,6 +410,11 @@ class Handler(BaseHTTPRequestHandler):
             if not _valid_id(parts[2]):
                 return self._error(400, "invalid workspace id")
             self.server.store.delete_workspace_schedule(parts[2])
+            return self._json(200, {"deleted": parts[2]})
+        if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "github":
+            if not _valid_id(parts[2]):
+                return self._error(400, "invalid workspace id")
+            self.server.store.delete_workspace_github(parts[2])
             return self._json(200, {"deleted": parts[2]})
         if len(parts) == 3 and parts[:2] == ["api", "scans"] and _valid_id(parts[2]):
             if self.server.store.delete_scan(parts[2]):
@@ -501,6 +534,40 @@ class Handler(BaseHTTPRequestHandler):
         if scan is None:
             return self._error(404, "scan or finding not found")
         return self._json(200, scan)
+
+    def _open_pull_request(self, scan: Dict[str, Any]) -> None:
+        """Open a real GitHub pull request for ``scan`` via the stored config.
+
+        The scan must belong to a workspace with a stored GitHub config whose
+        ``repo`` is set; the configured ``token_env`` must be present in the
+        process environment. Those local prerequisites are client errors (HTTP
+        400). Once the connector runs, any upstream failure is reported as HTTP
+        200 with ``{"ok": false, ...}`` so the connector result is always
+        returned and a scan is never mutated.
+        """
+        workspace = scan.get("workspace")
+        if not workspace:
+            return self._error(400, "github not configured")
+        config = self.server.store.get_workspace_github(workspace)
+        repo = str(config.get("repo") or "")
+        if not repo:
+            return self._error(400, "github not configured")
+        token_env = str(config.get("token_env") or DEFAULT_GITHUB_TOKEN_ENV)
+        if not os.environ.get(token_env):
+            return self._error(400, "token env %s is not set" % token_env)
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlparse(self.path).query, keep_blank_values=True
+        )
+        branch_prefix = query.get("prefix", [pullrequest.DEFAULT_BRANCH_PREFIX])[0]
+        if not _valid_branch(branch_prefix):
+            return self._error(400, "invalid prefix")
+        base_branch = str(
+            config.get("base_branch") or pullrequest.DEFAULT_BASE_BRANCH
+        )
+        suggestion = pullrequest.build_suggestion(
+            scan, base_branch=base_branch, branch_prefix=branch_prefix
+        )
+        return self._json(200, github.open_pull_request(config, suggestion))
 
 
 def create_server(host: str, port: int, store: Store) -> DriftHTTPServer:

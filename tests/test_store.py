@@ -380,6 +380,93 @@ class StoreTest(unittest.TestCase):
             reopened.get_workspace_webhook("ws3")["url"], "https://hooks.example.com/ok"
         )
 
+    def test_workspace_github_crud(self):
+        default = self.store.get_workspace_github("ws1")
+        self.assertEqual(default["repo"], "")
+        self.assertEqual(default["base_branch"], "main")
+        self.assertEqual(default["token_env"], "GITHUB_TOKEN")
+        saved = self.store.set_workspace_github("ws1", {"repo": "owner/name"})
+        self.assertEqual(saved["repo"], "owner/name")
+        self.assertEqual(saved["base_branch"], "main")
+        self.assertEqual(saved["token_env"], "GITHUB_TOKEN")
+        self.assertEqual(self.store.get_workspace_github("ws1"), saved)
+        self.assertTrue(self.store.delete_workspace_github("ws1"))
+        self.assertFalse(self.store.delete_workspace_github("ws1"))
+        self.assertEqual(self.store.get_workspace_github("ws1")["repo"], "")
+
+    def test_workspace_github_empty_repo_clears(self):
+        self.store.set_workspace_github("ws1", {"repo": "owner/name"})
+        stored = self.store.set_workspace_github("ws1", {"repo": "   "})
+        self.assertEqual(stored["repo"], "")
+        self.assertEqual(self.store.get_workspace_github("ws1")["repo"], "")
+
+    def test_workspace_github_validation(self):
+        for bad in (
+            {"repo": "not-a-repo"},
+            {"repo": "owner/name/extra"},
+            {"repo": "owner/"},
+            {"repo": "owner/name", "base_branch": "bad branch!"},
+            {"repo": "owner/name", "base_branch": "x" * 201},
+            {"repo": "owner/name", "token_env": "1BAD"},
+            {"repo": "owner/name", "token_env": "has space"},
+            None,
+            "nope",
+        ):
+            with self.assertRaises(ValueError):
+                self.store.set_workspace_github("ws1", bad)
+
+    def test_workspace_github_accepts_custom_fields(self):
+        saved = self.store.set_workspace_github(
+            "ws1",
+            {"repo": "owner/name", "base_branch": "release/4.2", "token_env": "DOCS_TOKEN"},
+        )
+        self.assertEqual(saved["base_branch"], "release/4.2")
+        self.assertEqual(saved["token_env"], "DOCS_TOKEN")
+
+    def test_workspace_github_persists_across_instances(self):
+        self.store.set_workspace_github("ws1", {"repo": "owner/name"})
+        reopened = Store(self.path)
+        self.assertEqual(reopened.get_workspace_github("ws1")["repo"], "owner/name")
+
+    def test_workspace_github_rejects_invalid_names(self):
+        for bad in ("bad id!", "", "a" * 65, "a/b", None):
+            with self.assertRaises(ValueError):
+                self.store.get_workspace_github(bad)
+            with self.assertRaises(ValueError):
+                self.store.set_workspace_github(bad, {"repo": "owner/name"})
+            with self.assertRaises(ValueError):
+                self.store.delete_workspace_github(bad)
+
+    def test_old_store_without_github_key_loads(self):
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write('{"scans": {}}')
+        reopened = Store(self.path)
+        self.assertEqual(reopened.get_workspace_github("ws1")["repo"], "")
+        reopened.set_workspace_github("ws1", {"repo": "owner/name"})
+        self.assertEqual(reopened.get_workspace_github("ws1")["repo"], "owner/name")
+
+    def test_malformed_github_key_does_not_discard_scans_or_rules(self):
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "scans": {"s1": {"id": "s1", "name": "Old", "stats": {}}},
+                        "workspace_rules": {"ws1": [{"kind": "label", "value": "Save"}]},
+                        "workspace_github": {
+                            "ws1": {"repo": "not-a-repo"},
+                            "ws2": 123,
+                            "ws3": {"repo": "owner/name"},
+                            "bad id!": {"repo": "owner/name"},
+                        },
+                    }
+                )
+            )
+        reopened = Store(self.path)
+        self.assertIsNotNone(reopened.get_scan("s1"))
+        self.assertEqual(reopened.list_workspace_rules("ws1")[0]["value"], "Save")
+        self.assertEqual(reopened.get_workspace_github("ws1")["repo"], "")
+        self.assertEqual(reopened.get_workspace_github("ws3")["repo"], "owner/name")
+
     def test_workspace_schedule_crud(self):
         default = self.store.get_workspace_schedule("ws1")
         self.assertEqual(default["interval_hours"], 0)

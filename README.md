@@ -25,6 +25,7 @@ Open <http://localhost:8080>. The service exposes:
 - `GET  /api/scans/{id}` — scan detail with findings.
 - `GET  /api/scans/{id}/suppressed` — per-rule suppressed-finding drill-down.
 - `GET  /api/scans/{id}/pull-request` — PR suggestion document (`base`, `prefix` optional).
+- `POST /api/scans/{id}/pull-request/open` — open the branch and pull request on GitHub (`prefix` optional).
 - `GET  /api/scans/{id}/export.md` — Markdown checklist export.
 - `POST /api/scans/{id}/findings/{fid}/resolve` — set `{"resolved": true|false}`.
 - `DELETE /api/scans/{id}` — delete a scan.
@@ -41,6 +42,9 @@ Open <http://localhost:8080>. The service exposes:
 - `GET  /api/workspaces/{ws}/schedule` — read the recurring scan schedule (disabled default when unset).
 - `PUT  /api/workspaces/{ws}/schedule` — set the schedule with `{"interval_hours": 1..168, "enabled": true, "scan": {...}}`; `{}` or `{"enabled": false}` disables but keeps the config.
 - `DELETE /api/workspaces/{ws}/schedule` — clear the schedule.
+- `GET  /api/workspaces/{ws}/github` — read the stored GitHub connector config.
+- `PUT  /api/workspaces/{ws}/github` — set the connector with `{"repo": "owner/name", "base_branch": "main", "token_env": "GITHUB_TOKEN"}`; an empty `repo` clears it.
+- `DELETE /api/workspaces/{ws}/github` — clear the connector config.
 - `GET  /api/schedule/status` — scheduler status (`enabled`, `tick_seconds`, `due`, `schedules`).
 
 ### Scan request body
@@ -433,6 +437,57 @@ against `[A-Za-z0-9._/-]`; anything else returns HTTP 400. An unknown scan id
 returns HTTP 404 and an invalid scan id returns HTTP 400, matching the other scan
 routes. A scan with no high-severity findings still returns HTTP 200 with an
 empty `files` list and a body stating that no action is required.
+
+### Opening the pull request on GitHub
+
+The connector turns the same high-severity suggestion into a real branch and
+pull request through the GitHub REST API. It is dependency-free (standard-library
+`urllib.request` only) and is configured once per workspace:
+
+```sh
+curl -sS -X PUT localhost:8080/api/workspaces/ws1/github \
+  -H 'content-type: application/json' \
+  --data '{"repo":"acme/help-center","base_branch":"main","token_env":"GITHUB_TOKEN"}'
+
+curl -sS localhost:8080/api/workspaces/ws1/github | python3 -m json.tool
+
+# open a branch and pull request for an existing scan
+curl -sS -X POST localhost:8080/api/scans/<scan-id>/pull-request/open \
+  | python3 -m json.tool
+
+curl -sS -X DELETE localhost:8080/api/workspaces/ws1/github
+```
+
+- `GET .../github` returns HTTP 200 with the stored config, or the default
+  `{"workspace": ws, "repo": "", "base_branch": "main", "token_env":
+  "GITHUB_TOKEN"}` when unset. An invalid workspace id returns HTTP 400.
+- `PUT .../github` requires a `repo`. `repo` must be `owner/name`, `base_branch`
+  must match `[A-Za-z0-9._/-]{1,200}` (default `main`) and `token_env` must be a
+  valid environment-variable name (default `GITHUB_TOKEN`). Anything else returns
+  HTTP 400. An empty `repo` (for example `{"repo": ""}`) clears the config.
+- `DELETE .../github` clears it and returns `{"deleted": "ws1"}`.
+
+The token itself is never stored: `token_env` names the environment variable the
+running process reads when it opens the PR. `POST /api/scans/{id}/pull-request/open`
+builds the suggestion with the stored `base_branch` (an optional `prefix` query
+parameter overrides the `docs-drift` branch prefix) and calls the connector:
+
+- an unknown scan id returns HTTP 404; an invalid id, a scan without a configured
+  workspace repo, or an unset `token_env` returns HTTP 400;
+- otherwise it returns HTTP 200 with the connector result
+  `{"ok", "status", "error", "pr_url", "branch"}` (see
+  `examples/sample_github_pull_request.json`). An upstream failure (for example a
+  branch that already exists, a bad token or an unreachable API) is reported as
+  HTTP 200 with `{"ok": false, "error": "..."}` rather than failing the request.
+
+The connector resolves the base branch, creates the new ref, commits the exported
+drift checklist as `docs-drift/<scan_id>.md` and opens the pull request. It never
+force-pushes: if the branch already exists the call fails instead of moving it.
+After every stored scan for a workspace **with a configured repo**, the service
+also opens the PR automatically as a best-effort step, exactly like the outbound
+webhook: a missing config is a no-op and any failure is logged to stderr and
+never changes the scan response, so `POST /api/scans` still returns HTTP 201 with
+the unchanged scan document.
 
 ### Example
 

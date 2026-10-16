@@ -11,7 +11,7 @@ from __future__ import annotations
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import analyze, notify
+from . import analyze, github, notify, pullrequest
 
 MAX_PAGES = 2000
 
@@ -106,6 +106,37 @@ def notify_webhook(store: Any, scan: Dict[str, Any]) -> None:
         sys.stderr.write("docs-drift: webhook dispatch error: %s\n" % err)
 
 
+def open_github_pr(store: Any, scan: Dict[str, Any]) -> None:
+    """Best-effort automatic pull request for a stored scan.
+
+    The scan's workspace must have a stored GitHub config with a ``repo``; the
+    configured token is read from the environment by
+    :func:`docs_drift_detector.github.open_pull_request`. Opening never raises
+    and never changes the scan response; a missing config is a no-op and any
+    other failure is written to stderr only.
+    """
+    workspace = scan.get("workspace")
+    if not workspace:
+        return
+    try:
+        config = store.get_workspace_github(workspace)
+        repo = str(config.get("repo") or "")
+        if not repo:
+            return
+        base_branch = str(
+            config.get("base_branch") or pullrequest.DEFAULT_BASE_BRANCH
+        )
+        suggestion = pullrequest.build_suggestion(scan, base_branch=base_branch)
+        result = github.open_pull_request(config, suggestion)
+        if not result.get("ok"):
+            sys.stderr.write(
+                "docs-drift: pull request failed (workspace=%s, repo=%s): %s\n"
+                % (workspace, repo, result.get("error") or result.get("status"))
+            )
+    except Exception as err:  # never let the connector break the response
+        sys.stderr.write("docs-drift: pull request error: %s\n" % err)
+
+
 def run_scan(
     store: Any,
     data: Dict[str, Any],
@@ -126,4 +157,5 @@ def run_scan(
     )
     if dispatch:
         notify_webhook(store, scan)
+        open_github_pr(store, scan)
     return scan

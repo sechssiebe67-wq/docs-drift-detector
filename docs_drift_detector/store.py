@@ -20,11 +20,16 @@ from urllib.parse import urlparse
 from . import analyze
 
 _WORKSPACE_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_GITHUB_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_GITHUB_TOKEN_ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_BASE_BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,200}$")
 
 MAX_RULE_HISTORY = 20
 MAX_WEBHOOK_URL = 500
 MIN_SCHEDULE_HOURS = 1
 MAX_SCHEDULE_HOURS = 168
+DEFAULT_GITHUB_BASE_BRANCH = "main"
+DEFAULT_GITHUB_TOKEN_ENV = "GITHUB_TOKEN"
 _RULE_HISTORY_ACTIONS = ("set", "import", "clear", "promote")
 
 
@@ -76,6 +81,45 @@ def _parse_time(value: Any) -> Optional[datetime]:
 def _iso_after_hours(hours: int) -> str:
     moment = datetime.now(timezone.utc) + timedelta(hours=hours)
     return moment.replace(microsecond=0).isoformat()
+
+
+def _default_github(workspace: str) -> Dict[str, str]:
+    return {
+        "workspace": workspace,
+        "repo": "",
+        "base_branch": DEFAULT_GITHUB_BASE_BRANCH,
+        "token_env": DEFAULT_GITHUB_TOKEN_ENV,
+    }
+
+
+def _normalise_github(workspace: str, config: Any) -> Dict[str, str]:
+    """Validate and normalise a stored GitHub connector config.
+
+    Raises :class:`ValueError` for a config that cannot be stored. An empty
+    ``repo`` is allowed and clears the config (returning the default shape), so
+    the connector can be disabled without a separate flag. A non-empty ``repo``
+    must be ``owner/name``; ``base_branch`` must match the shared branch guard
+    and ``token_env`` must be a valid environment-variable name.
+    """
+    if not isinstance(config, dict):
+        raise ValueError("invalid github config")
+    repo = str(config.get("repo") or "").strip()
+    base_branch = str(config.get("base_branch") or DEFAULT_GITHUB_BASE_BRANCH).strip()
+    token_env = str(config.get("token_env") or DEFAULT_GITHUB_TOKEN_ENV).strip()
+    if not repo:
+        return _default_github(workspace)
+    if not _GITHUB_REPO_RE.match(repo):
+        raise ValueError("invalid github repo")
+    if not _BASE_BRANCH_RE.match(base_branch):
+        raise ValueError("invalid base_branch")
+    if not _GITHUB_TOKEN_ENV_RE.match(token_env):
+        raise ValueError("invalid token_env")
+    return {
+        "workspace": workspace,
+        "repo": repo,
+        "base_branch": base_branch,
+        "token_env": token_env,
+    }
 
 
 def _default_schedule(workspace: str) -> Dict[str, Any]:
@@ -154,6 +198,7 @@ class Store:
         self._workspace_rule_history: Dict[str, List[Dict[str, Any]]] = {}
         self._workspace_webhooks: Dict[str, str] = {}
         self._workspace_schedules: Dict[str, Dict[str, Any]] = {}
+        self._workspace_github: Dict[str, Dict[str, str]] = {}
         self._load()
 
     def _load(self) -> None:
@@ -222,6 +267,19 @@ class Store:
                     continue
                 loaded_schedules[workspace] = normalised_schedule
             self._workspace_schedules = loaded_schedules
+        github = data.get("workspace_github")
+        if isinstance(github, dict):
+            loaded_github: Dict[str, Dict[str, str]] = {}
+            for workspace, config in github.items():
+                if not isinstance(workspace, str) or not _valid_workspace(workspace):
+                    continue
+                try:
+                    normalised_github = _normalise_github(workspace, config)
+                except ValueError:
+                    continue
+                if normalised_github.get("repo"):
+                    loaded_github[workspace] = normalised_github
+            self._workspace_github = loaded_github
 
     def _persist(self) -> None:
         directory = os.path.dirname(os.path.abspath(self.path))
@@ -236,6 +294,7 @@ class Store:
                         "workspace_rule_history": self._workspace_rule_history,
                         "workspace_webhooks": self._workspace_webhooks,
                         "workspace_schedules": self._workspace_schedules,
+                        "workspace_github": self._workspace_github,
                     },
                     handle,
                     ensure_ascii=False,
@@ -345,6 +404,33 @@ class Store:
         with self._lock:
             existed = name in self._workspace_webhooks
             self._workspace_webhooks.pop(name, None)
+            self._persist()
+            return existed
+
+    def get_workspace_github(self, workspace: str) -> Dict[str, str]:
+        name = self._check_workspace(workspace)
+        with self._lock:
+            config = self._workspace_github.get(name)
+            if not config:
+                return _default_github(name)
+            return copy.deepcopy(config)
+
+    def set_workspace_github(self, workspace: str, config: Any) -> Dict[str, str]:
+        name = self._check_workspace(workspace)
+        normalised = _normalise_github(name, config)
+        with self._lock:
+            if normalised.get("repo"):
+                self._workspace_github[name] = normalised
+            else:
+                self._workspace_github.pop(name, None)
+            self._persist()
+            return copy.deepcopy(normalised)
+
+    def delete_workspace_github(self, workspace: str) -> bool:
+        name = self._check_workspace(workspace)
+        with self._lock:
+            existed = name in self._workspace_github
+            self._workspace_github.pop(name, None)
             self._persist()
             return existed
 
