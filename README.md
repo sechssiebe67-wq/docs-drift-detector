@@ -34,6 +34,9 @@ Open <http://localhost:8080>. The service exposes:
 - `POST /api/workspaces/{ws}/rules/import` — replace the library from an exported document.
 - `GET  /api/workspaces/{ws}/rules/history` — list recent library revisions, newest first.
 - `POST /api/workspaces/{ws}/rules/history/{revision}/promote` — restore a revision as the live library.
+- `GET  /api/workspaces/{ws}/webhook` — read the stored outbound webhook (`{"workspace": ws, "url": ""}` when unset).
+- `PUT  /api/workspaces/{ws}/webhook` — set the webhook with `{"url": "https://..."}`; an empty URL clears it.
+- `DELETE /api/workspaces/{ws}/webhook` — clear the webhook.
 
 ### Scan request body
 
@@ -212,6 +215,63 @@ curl -sS -X POST localhost:8080/api/workspaces/ws1/rules/history/1/promote \
 the current library, records a new `promote` revision and returns HTTP 200 with
 `{"rules": [...], "promoted": revision}`. An unknown revision returns HTTP 404,
 and an invalid workspace id or non-integer revision returns HTTP 400.
+
+### Outbound webhooks
+
+A webhook URL can be registered once per workspace so a documentation team is
+notified in Slack, Teams or CI without polling the UI. After a stored scan for
+that workspace is created successfully, the service POSTs a JSON payload to the
+URL:
+
+```sh
+curl -sS -X PUT localhost:8080/api/workspaces/ws1/webhook \
+  -H 'content-type: application/json' \
+  --data '{"url":"https://hooks.example.com/ddr"}'
+
+curl -sS localhost:8080/api/workspaces/ws1/webhook | python3 -m json.tool
+
+curl -sS -X DELETE localhost:8080/api/workspaces/ws1/webhook
+```
+
+- `GET .../webhook` returns HTTP 200 with `{"workspace": "ws1", "url": "..."}`;
+  `url` is `""` when unset. An invalid workspace id returns HTTP 400.
+- `PUT .../webhook` accepts `{"url": "https://..."}` and returns the stored
+  value. The URL must be `http`/`https` and at most 500 characters; anything
+  else (for example `ftp://x` or a URL longer than 500 chars) returns HTTP 400.
+  An empty `url` clears the webhook.
+- `DELETE .../webhook` clears it and returns `{"deleted": "ws1"}`.
+
+The POSTed body is produced by `notify.build_payload`:
+
+```json
+{
+  "scan_id": "a1b2c3d4e5f6",
+  "name": "Release 4.2",
+  "workspace": "ws1",
+  "created_at": "2026-01-01T12:00:00+00:00",
+  "url": "/api/scans/a1b2c3d4e5f6",
+  "findings": [
+    {
+      "id": "0f9c...",
+      "kind": "label",
+      "page": "help/getting-started.md",
+      "title": "UI label \"Save\" changed in the release",
+      "old_value": "Save",
+      "new_value": "Save changes",
+      "score": 95.0,
+      "severity": "high"
+    }
+  ]
+}
+```
+
+Only `severity == "high"` findings are sent, sorted by descending `score` (then
+page, then id); a scan with no high-severity findings sends an empty `findings`
+list. Delivery is best-effort: a single plain `urllib.request` POST with
+`content-type: application/json`, no retry queue and no HMAC signing. A missing
+or failing endpoint is logged to stderr and never blocks or changes the scan
+response, so `POST /api/scans` still returns HTTP 201 with the unchanged scan
+document.
 
 ### Example
 

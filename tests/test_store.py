@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import tempfile
@@ -300,6 +301,84 @@ class StoreTest(unittest.TestCase):
         history = reopened.list_workspace_rule_history("ws1")
         self.assertEqual([entry["revision"] for entry in history], [2])
         self.assertEqual(history[0]["rules"][0]["value"], "Keep")
+
+    def test_workspace_webhook_crud(self):
+        self.assertEqual(self.store.get_workspace_webhook("ws1"), {"url": ""})
+        saved = self.store.set_workspace_webhook("ws1", "https://hooks.example.com/ddr")
+        self.assertEqual(saved, {"url": "https://hooks.example.com/ddr"})
+        self.assertEqual(
+            self.store.get_workspace_webhook("ws1"), {"url": "https://hooks.example.com/ddr"}
+        )
+        self.assertTrue(self.store.delete_workspace_webhook("ws1"))
+        self.assertEqual(self.store.get_workspace_webhook("ws1"), {"url": ""})
+        self.assertFalse(self.store.delete_workspace_webhook("ws1"))
+
+    def test_workspace_webhook_empty_clears(self):
+        self.store.set_workspace_webhook("ws1", "https://hooks.example.com/ddr")
+        stored = self.store.set_workspace_webhook("ws1", "   ")
+        self.assertEqual(stored, {"url": ""})
+        self.assertEqual(self.store.get_workspace_webhook("ws1"), {"url": ""})
+
+    def test_workspace_webhook_validation(self):
+        for bad in (
+            "ftp://x",
+            "javascript:alert(1)",
+            "https://",
+            "https://" + "a" * 500,
+            None,
+            42,
+        ):
+            with self.assertRaises(ValueError):
+                self.store.set_workspace_webhook("ws1", bad)
+
+    def test_workspace_webhook_persists_across_instances(self):
+        self.store.set_workspace_webhook("ws1", "https://hooks.example.com/ddr")
+        reopened = Store(self.path)
+        self.assertEqual(
+            reopened.get_workspace_webhook("ws1")["url"], "https://hooks.example.com/ddr"
+        )
+
+    def test_workspace_webhook_rejects_invalid_names(self):
+        for bad in ("bad id!", "", "a" * 65, "a/b", None):
+            with self.assertRaises(ValueError):
+                self.store.get_workspace_webhook(bad)
+            with self.assertRaises(ValueError):
+                self.store.set_workspace_webhook(bad, "https://x.example")
+            with self.assertRaises(ValueError):
+                self.store.delete_workspace_webhook(bad)
+
+    def test_old_store_without_webhooks_key_loads(self):
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write('{"scans": {}}')
+        reopened = Store(self.path)
+        self.assertEqual(reopened.get_workspace_webhook("ws1"), {"url": ""})
+        reopened.set_workspace_webhook("ws1", "https://x.example")
+        self.assertEqual(reopened.get_workspace_webhook("ws1")["url"], "https://x.example")
+
+    def test_malformed_webhooks_key_does_not_discard_scans_or_rules(self):
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "scans": {"s1": {"id": "s1", "name": "Old", "stats": {}}},
+                        "workspace_rules": {"ws1": [{"kind": "label", "value": "Save"}]},
+                        "workspace_webhooks": {
+                            "ws1": "ftp://bad",
+                            "ws2": 123,
+                            "ws3": "https://hooks.example.com/ok",
+                            "bad id!": "https://x.example",
+                        },
+                    }
+                )
+            )
+        reopened = Store(self.path)
+        self.assertIsNotNone(reopened.get_scan("s1"))
+        self.assertEqual(len(reopened.list_scans()), 1)
+        self.assertEqual(reopened.list_workspace_rules("ws1")[0]["value"], "Save")
+        self.assertEqual(reopened.get_workspace_webhook("ws1"), {"url": ""})
+        self.assertEqual(
+            reopened.get_workspace_webhook("ws3")["url"], "https://hooks.example.com/ok"
+        )
 
     @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root bypasses filesystem permissions")
     def test_create_scan_survives_write_failure(self):
