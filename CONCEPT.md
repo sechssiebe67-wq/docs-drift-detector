@@ -104,10 +104,12 @@ manual review marathon.
   clears). After every stored scan for that workspace succeeds, the service
   POSTs a JSON payload describing the scan and its **high-severity findings
   only** (sorted by descending score) to the configured URL via
-  `notify.build_payload` and `notify.dispatch`. Delivery is best-effort: a
-  single plain `urllib.request` POST with `content-type: application/json`,
-  no retry queue and no HMAC signing, so a missing or failing endpoint is
-  logged to stderr and never blocks or changes the scan response. The config
+  `notify.build_payload` and `notify.dispatch_with_retry`. Delivery is
+  best-effort: a plain `urllib.request` POST with `content-type: application/json`
+  that is retried a bounded number of times with exponential backoff (see
+  *Bounded webhook/digest delivery retries*), with no durable retry queue and no
+  HMAC signing, so a missing or failing endpoint is logged to stderr and never
+  blocks or changes the scan response. The config
   is stored in the same JSON file under `workspace_webhooks` and reloading
   tolerates a missing or malformed key.
 - **Pull-request suggestion document.** A stored scan can be turned into a
@@ -154,7 +156,8 @@ manual review marathon.
   (`MAX_DIGEST_HISTORY = 20` entries per workspace, oldest dropped) stored with
   the scans in the same JSON file under `workspace_digests`. Each entry records
   `created_at` (UTC ISO-8601), `scan_id`, `total_findings`, `by_severity`,
-  `new_high_count`, `delivery_ok` and `delivery_error`, so a documentation lead
+  `new_high_count`, `delivery_ok`, `delivery_error` and `attempts` (the number
+  of webhook POSTs actually made for that digest), so a documentation lead
   can audit what the scheduler POSTed, when, and how many new high-severity
   findings it carried instead of relying only on the receiver's logs.
   `GET /api/workspaces/{ws}/digests` lists the most recent entries newest-first
@@ -164,6 +167,22 @@ manual review marathon.
   erroring webhook still records the digest attempt with `delivery_ok: false`
   (and a non-empty `delivery_error`) and never changes the stored scan or stops
   the scheduler.
+- **Bounded webhook/digest delivery retries.** Outbound delivery is no longer a
+  single best-effort POST. `notify.dispatch_with_retry` retries a failed POST a
+  small, fixed number of times with exponential backoff before giving up: it
+  performs at most `attempts` POSTs and sleeps before each retry, doubling the
+  delay each time. The attempt count comes from `DDR_WEBHOOK_RETRIES` (default
+  `3`; missing, non-integer or non-positive values fall back to the default) and
+  the base delay from `DDR_WEBHOOK_BACKOFF` (default `0.5` seconds; missing,
+  non-numeric, non-finite or non-positive values fall back). Both ordinary scan
+  webhooks and scheduler digests route through the helper. Retries are strictly
+  best-effort and standard-library only: they never block the scan response,
+  never change or delay a stored scan, never stop the scheduler and never raise
+  into the caller, and both `sleep` and the HTTP `opener` are injectable so tests
+  neither wait nor touch the network. The final result carries `ok`, `attempts`
+  (the number of POSTs actually made) and `error` (the last error, empty on
+  success); the attempt count is recorded as `attempts` in each digest history
+  entry.
 - **Per-workspace drift trend.** A workspace's recent stored scans can be
   summarised into a chronological time series through
   `GET /api/workspaces/{ws}/trend` (optional integer `limit`, default `10`,
@@ -343,14 +362,17 @@ release-to-docs comparison with text and screenshot matching.
   full visual diff engine, so cosmetic layout changes must be filtered upstream.
 - Matching is lexical; heavily paraphrased documentation must still be reviewed
   by a human.
-- Webhook delivery is best-effort with no retry queue, so a scan is never
-  delayed or failed by a webhook. Delivery is plain HTTP POST with no HMAC
-  signing yet, so receivers should treat the endpoint as untrusted.
+- Webhook delivery is best-effort with a bounded in-process retry
+  (`DDR_WEBHOOK_RETRIES`, `DDR_WEBHOOK_BACKOFF`) but no durable retry queue, so
+  a scan is never delayed or failed by a webhook and a failure that outlasts the
+  retries is dropped after being logged and recorded. Delivery is plain HTTP
+  POST with no HMAC signing yet, so receivers should treat the endpoint as
+  untrusted.
 - The scheduler is single-process and in-memory: it runs only inside the HTTP
   process that started it, there is no cron expression support (intervals are
   whole hours only) and no durable job queue, so a process restart skips any
   tick that was missed while it was down. Digest delivery is the same
-  best-effort webhook POST as ordinary notifications.
+  best-effort, retrying webhook POST as ordinary notifications.
 - The GitHub connector is best-effort and single-PR: it commits the drift
   checklist report rather than editing the documentation prose, never
   force-pushes (if the branch already exists the call fails instead of moving

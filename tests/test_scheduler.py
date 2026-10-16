@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr
 from datetime import datetime, timezone
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -157,6 +158,39 @@ class SchedulerTest(unittest.TestCase):
         self.assertEqual(entry["new_high_count"], 0)
         self.assertTrue(entry["delivery_ok"])
         self.assertEqual(entry["delivery_error"], "")
+        self.assertEqual(entry["attempts"], 1)
+
+    def test_failing_webhook_records_attempts_after_retries(self):
+        self._schedule("ws1")
+        self.store.set_workspace_webhook("ws1", "https://hooks.example.com/x")
+        original = notify.dispatch
+        notify.dispatch = lambda url, payload, timeout=5: {
+            "ok": False,
+            "status": 500,
+            "error": "HTTP 500",
+        }
+        try:
+            with mock.patch.dict(
+                os.environ,
+                {"DDR_WEBHOOK_RETRIES": "2", "DDR_WEBHOOK_BACKOFF": "0.001"},
+            ):
+                Scheduler(self.store).run_once(NOW)
+        finally:
+            notify.dispatch = original
+
+        history = self.store.list_workspace_digests("ws1")
+        self.assertEqual(len(history), 1)
+        entry = history[0]
+        self.assertFalse(entry["delivery_ok"])
+        self.assertEqual(entry["delivery_error"], "HTTP 500")
+        self.assertEqual(entry["attempts"], 2)
+
+    def test_no_webhook_records_zero_attempts(self):
+        self._schedule("ws1")
+        Scheduler(self.store).run_once(NOW)
+        entry = self.store.list_workspace_digests("ws1")[0]
+        self.assertFalse(entry["delivery_ok"])
+        self.assertEqual(entry["attempts"], 0)
 
     def test_failing_webhook_records_digest_and_continues(self):
         self._schedule("ws1")

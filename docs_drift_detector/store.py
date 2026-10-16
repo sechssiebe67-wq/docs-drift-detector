@@ -239,6 +239,9 @@ def _normalise_digest_entry(entry: Any) -> Optional[Dict[str, Any]]:
     delivery_error = entry.get("delivery_error")
     if not isinstance(delivery_error, str):
         delivery_error = ""
+    attempts = entry.get("attempts")
+    if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 0:
+        attempts = 0
     return {
         "created_at": created_at,
         "scan_id": scan_id,
@@ -247,6 +250,7 @@ def _normalise_digest_entry(entry: Any) -> Optional[Dict[str, Any]]:
         "new_high_count": new_high_count,
         "delivery_ok": bool(entry.get("delivery_ok", False)),
         "delivery_error": delivery_error,
+        "attempts": attempts,
     }
 
 
@@ -628,8 +632,9 @@ class Store:
         ``delivery`` is the result of the webhook dispatch (or a synthetic
         failure when no webhook is configured). The stored entry keeps the
         audit-relevant summary: ``created_at``, ``scan_id``, ``total_findings``,
-        ``by_severity``, ``new_high_count``, ``delivery_ok`` and
-        ``delivery_error``. History is capped at :data:`MAX_DIGEST_HISTORY`
+        ``by_severity``, ``new_high_count``, ``delivery_ok``,
+        ``delivery_error`` and ``attempts`` (the number of webhook POSTs made).
+        History is capped at :data:`MAX_DIGEST_HISTORY`
         entries per workspace, dropping the oldest first.
         """
         name = self._check_workspace(workspace)
@@ -654,6 +659,9 @@ class Store:
         delivery_error = delivery.get("error")
         if not isinstance(delivery_error, str):
             delivery_error = ""
+        attempts = delivery.get("attempts")
+        if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 0:
+            attempts = 0
         entry = {
             "created_at": _utc_now(),
             "scan_id": str(digest.get("scan_id") or ""),
@@ -662,6 +670,7 @@ class Store:
             "new_high_count": new_high_count,
             "delivery_ok": bool(delivery.get("ok")),
             "delivery_error": delivery_error,
+            "attempts": attempts,
         }
         with self._lock:
             entries = self._workspace_digests.setdefault(name, [])

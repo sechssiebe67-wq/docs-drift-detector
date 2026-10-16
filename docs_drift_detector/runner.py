@@ -96,7 +96,7 @@ def notify_webhook(store: Any, scan: Dict[str, Any]) -> None:
         url = config.get("url") or ""
         if not url:
             return
-        result = notify.dispatch(url, notify.build_payload(scan))
+        result = notify.dispatch_with_retry(url, notify.build_payload(scan))
         if not result.get("ok"):
             sys.stderr.write(
                 "docs-drift: webhook delivery failed (workspace=%s, url=%s): %s\n"

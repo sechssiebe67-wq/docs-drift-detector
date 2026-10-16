@@ -286,11 +286,33 @@ The POSTed body is produced by `notify.build_payload`:
 
 Only `severity == "high"` findings are sent, sorted by descending `score` (then
 page, then id); a scan with no high-severity findings sends an empty `findings`
-list. Delivery is best-effort: a single plain `urllib.request` POST with
-`content-type: application/json`, no retry queue and no HMAC signing. A missing
-or failing endpoint is logged to stderr and never blocks or changes the scan
-response, so `POST /api/scans` still returns HTTP 201 with the unchanged scan
-document.
+list. Delivery is best-effort and standard-library only: a plain
+`urllib.request` POST with `content-type: application/json`, no durable retry
+queue and no HMAC signing. A missing or failing endpoint is logged to stderr and
+never blocks or changes the scan response, so `POST /api/scans` still returns
+HTTP 201 with the unchanged scan document. A failed POST is retried a bounded
+number of times with exponential backoff; see *Webhook and digest retries* below.
+
+#### Webhook and digest retries
+
+Both ordinary scan webhooks and scheduler digests are delivered through
+`notify.dispatch_with_retry`, which retries a failed POST a small, fixed number
+of times with exponential backoff before recording the failure:
+
+- It performs at most `DDR_WEBHOOK_RETRIES` POSTs (default `3`). A missing,
+  non-integer or non-positive value falls back to `3`.
+- It sleeps `DDR_WEBHOOK_BACKOFF` seconds before the first retry (default `0.5`)
+  and doubles the delay for each subsequent retry. A missing, non-numeric,
+  non-finite or non-positive value falls back to `0.5`.
+- The helper returns `{ok, attempts, status, error}`, where `attempts` is the
+  number of POSTs actually made and `error` is the last error (empty on
+  success). It never raises into its caller, so a dead receiver can never fail a
+  scan or stop the scheduler.
+
+For example, with the defaults a receiver that is down for two attempts makes
+three POSTs and sleeps `0.5s` then `1.0s` between them. The number of POSTs made
+is recorded as `attempts` in each digest history entry so the retry behaviour is
+auditable.
 
 ### Scheduled drift scans and digests
 
@@ -372,8 +394,10 @@ high-severity scope of `notify.build_payload` and keeps only findings whose
 `(kind, page, old_value, new_value)` key was absent from the previous stored
 scan for that workspace, so a schedule that fires with no changes sends an empty
 `new_high` list. Digest delivery is the same best-effort webhook POST as
-ordinary notifications: a failure is logged to stderr and never stops the
-scheduler or the other due schedules.
+ordinary notifications: it is retried a bounded number of times with exponential
+backoff (see *Webhook and digest retries* below), and a failure that outlasts the
+retries is logged to stderr and never stops the scheduler or the other due
+schedules.
 
 `GET /api/schedule/status` always returns HTTP 200 with:
 
@@ -409,7 +433,8 @@ curl -sS 'localhost:8080/api/workspaces/ws1/digests?limit=5' | python3 -m json.t
       "by_severity": {"high": 1, "medium": 1, "low": 1},
       "new_high_count": 1,
       "delivery_ok": true,
-      "delivery_error": ""
+      "delivery_error": "",
+      "attempts": 1
     }
   ]
 }
@@ -423,9 +448,11 @@ curl -sS 'localhost:8080/api/workspaces/ws1/digests?limit=5' | python3 -m json.t
   clamped and a non-integer (for example `limit=abc`) returns HTTP 400. The
   default is `10`.
 - Recording is best-effort: every due scheduled scan appends exactly one entry.
-  A missing, failing or erroring webhook still records the attempt with
-  `delivery_ok: false` and a non-empty `delivery_error`, and neither changes the
-  stored scan nor stops the scheduler.
+  Each entry carries `attempts`, the number of webhook POSTs actually made (`0`
+  when no webhook is configured, otherwise the count under *Webhook and digest
+  retries*). A missing, failing or erroring webhook still records the attempt
+  with `delivery_ok: false` and a non-empty `delivery_error`, and neither changes
+  the stored scan nor stops the scheduler.
 - An invalid workspace id (for example `bad id!`) returns HTTP 400. A
   well-formed but unknown workspace returns HTTP 200 with an empty `digests`
   list.
@@ -439,6 +466,15 @@ no cron expression support. Two environment variables control it:
 - `DDR_SCHEDULER_TICK` — scheduler tick in seconds (default `60`).
 - `DDR_SCHEDULER_ENABLED` — set to `0` to disable the background scheduler
   (default `1`); the status endpoint still works and reports `"enabled": false`.
+
+Two more environment variables control webhook and digest delivery retries
+(they apply to ordinary scan webhooks as well as scheduled digests):
+
+- `DDR_WEBHOOK_RETRIES` — maximum number of POST attempts before giving up
+  (default `3`; missing, non-integer or non-positive values fall back to `3`).
+- `DDR_WEBHOOK_BACKOFF` — base seconds to sleep before the first retry; the
+  delay doubles each retry (default `0.5`; missing, non-numeric, non-finite or
+  non-positive values fall back to `0.5`).
 
 ### Scan retention
 
