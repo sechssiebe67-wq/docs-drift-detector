@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import analyze, export, github, pullrequest, rollup, runner, trend
+from . import analyze, buckets, export, github, pullrequest, rollup, runner, trend
 from .store import (
     DEFAULT_GITHUB_TOKEN_ENV,
     MAX_DIGEST_HISTORY,
@@ -123,6 +123,28 @@ class Handler(BaseHTTPRequestHandler):
             return None, None
         return base_branch, branch_prefix
 
+    def _bucket_options(self) -> Tuple[Optional[str], Optional[int]]:
+        """Parse and validate the optional ``bucket``/``limit`` query values.
+
+        Returns ``(None, None)`` when ``bucket`` is not ``day``/``week`` or
+        ``limit`` is present but not an integer, so the caller can answer HTTP
+        400. A missing ``bucket`` defaults to ``week`` and a missing ``limit``
+        defaults to :data:`docs_drift_detector.trend.DEFAULT_LIMIT`.
+        """
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlparse(self.path).query, keep_blank_values=True
+        )
+        bucket = query.get("bucket", [buckets.DEFAULT_BUCKET])[0]
+        if not buckets.is_valid_bucket(bucket):
+            return None, None
+        limit = trend.DEFAULT_LIMIT
+        if "limit" in query:
+            try:
+                limit = int(query["limit"][0])
+            except (TypeError, ValueError):
+                return None, None
+        return bucket, limit
+
     # -- static files -----------------------------------------------------
     def _serve_static(self, relative: str) -> None:
         safe = os.path.normpath("/" + relative).lstrip("/")
@@ -197,6 +219,24 @@ class Handler(BaseHTTPRequestHandler):
                 except (TypeError, ValueError):
                     return self._error(400, "invalid limit")
             return self._json(200, trend.build_trend(self.server.store, parts[2], limit))
+        if (
+            len(parts) == 5
+            and parts[:2] == ["api", "workspaces"]
+            and parts[3] == "trend"
+            and parts[4] == "buckets"
+        ):
+            if not _valid_id(parts[2]):
+                return self._error(400, "invalid workspace id")
+            bucket, limit = self._bucket_options()
+            if bucket is None or limit is None:
+                return self._error(400, "invalid bucket or limit")
+            scans = self.server.store.list_workspace_scans(parts[2])
+            return self._json(
+                200,
+                buckets.build_workspace_buckets(
+                    scans, parts[2], bucket=bucket, limit=limit
+                ),
+            )
         if parts == ["api", "schedule", "status"]:
             return self._schedule_status()
         if (
@@ -234,6 +274,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, "invalid workspace id")
             history = self.server.store.list_workspace_rule_history(parts[2])
             return self._json(200, {"workspace": parts[2], "history": history})
+        if parts == ["api", "trend", "buckets"]:
+            bucket, limit = self._bucket_options()
+            if bucket is None or limit is None:
+                return self._error(400, "invalid bucket or limit")
+            scans = self.server.store.list_all_scans()
+            return self._json(
+                200, buckets.build_rollup_buckets(scans, bucket=bucket, limit=limit)
+            )
         if parts == ["api", "trend"]:
             query = urllib.parse.parse_qs(
                 urllib.parse.urlparse(self.path).query, keep_blank_values=True

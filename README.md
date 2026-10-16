@@ -51,7 +51,9 @@ Open <http://localhost:8080>. The service exposes:
 - `GET  /api/schedule/status` — scheduler status (`enabled`, `tick_seconds`, `due`, `schedules`).
 - `GET  /api/workspaces/{ws}/digests` — recent scheduled-scan digests for a workspace, newest first (`limit` optional, default `10`).
 - `GET  /api/workspaces/{ws}/trend` — chronological drift trend across a workspace's recent scans (`limit` optional, default `10`, max `50`).
+- `GET  /api/workspaces/{ws}/trend/buckets` — time-bucketed drift trend (`bucket` optional `day`|`week`, default `week`; `limit` optional, default `10`, max `50`).
 - `GET  /api/trend` — cross-workspace drift roll-up across the recent scans of all workspaces (`limit` optional, default `10`, max `50`).
+- `GET  /api/trend/buckets` — cross-workspace time-bucketed drift roll-up (`bucket` optional `day`|`week`, default `week`; `limit` optional, default `10`, max `50`).
 
 ### Scan request body
 
@@ -629,6 +631,160 @@ curl -sS 'localhost:8080/api/trend?limit=5' | python3 -m json.tool
 - The roll-up is bounded and keyed by workspace only: one chronological window
   in scan order rather than time buckets, with no pagination or date-range
   filtering. The scans live in the single JSON store.
+
+### Time-bucketed drift trend
+
+The trend and roll-up endpoints above present scans in *scan order* within a
+single window. To compare calendar periods instead — for example a release week
+against a quiet week, or to watch high-severity drift accumulate week over week —
+`GET /api/workspaces/{ws}/trend/buckets` groups a workspace's stored scans into
+day or ISO-week buckets by `created_at`. Both bucket routes are read-only: they
+reuse the stored scans and never mutate the store or dispatch a webhook, open a
+pull request or record a digest.
+
+```sh
+curl -sS 'localhost:8080/api/workspaces/ws1/trend/buckets?bucket=week&limit=5' \
+  | python3 -m json.tool
+```
+
+`GET /api/workspaces/{ws}/trend/buckets` returns HTTP 200 with:
+
+```json
+{
+  "workspace": "ws1",
+  "bucket": "week",
+  "buckets": [
+    {
+      "key": "2026-W02",
+      "start": "2026-01-05T00:00:00+00:00",
+      "end": "2026-01-11T23:59:59+00:00",
+      "scans": 2,
+      "total_findings": 3,
+      "by_severity": {"high": 2, "medium": 1, "low": 0},
+      "open_findings": 3,
+      "high_open": 2,
+      "suppressed": 0
+    }
+  ],
+  "summary": {
+    "scans": 2,
+    "buckets": 1,
+    "total_findings": 3,
+    "by_severity": {"high": 2, "medium": 1, "low": 0},
+    "open_findings": 3,
+    "high_open": 2,
+    "suppressed": 0,
+    "delta_high": 0
+  }
+}
+```
+
+- `bucket` selects the period width: `day` (UTC calendar day) or `week` (ISO
+  week starting Monday, UTC). The default is `week`. A missing value defaults to
+  `week`; any other value (for example `bucket=month` or an empty value) returns
+  HTTP 400.
+- Each bucket carries a stable `key` (`2026-01-05` for a day, `2026-W02` for a
+  week) and a UTC ISO-8601 `start`/`end` range (inclusive last second of the
+  period). `scans` is the number of stored scans in the period and
+  `total_findings`, `by_severity`, `open_findings`, `high_open` and `suppressed`
+  are the same per-scan counts the trend/roll-up endpoints report, so the two
+  views never diverge. Buckets are ordered **oldest-first**.
+- `summary` aggregates the whole window and adds `delta_high`
+  (`newest bucket high_open - oldest bucket high_open`, `0` when fewer than two
+  buckets are in the window) plus a `buckets` count.
+- The optional `limit` query parameter is an integer (default `10`) clamped into
+  `1..50`; it bounds the number of buckets, keeping the most recent ones. A
+  non-integer such as `limit=abc` returns HTTP 400. `limit=0` and `limit=999`
+  are clamped rather than rejected.
+- Malformed stored scans (a non-dict entry, or one with a missing/invalid `id`
+  or `created_at`) are skipped without changing the HTTP status. An invalid
+  workspace id (for example `bad id!`) returns HTTP 400; a well-formed but
+  unknown workspace returns HTTP 200 with an empty `buckets` list.
+
+The cross-workspace companion applies the same bucketing to **all** workspaces
+(plus scans with no workspace, grouped under the empty-string bucket):
+
+```sh
+curl -sS 'localhost:8080/api/trend/buckets?bucket=day' | python3 -m json.tool
+```
+
+`GET /api/trend/buckets` returns HTTP 200 with:
+
+```json
+{
+  "bucket": "day",
+  "buckets": [
+    {
+      "key": "2026-01-05",
+      "start": "2026-01-05T00:00:00+00:00",
+      "end": "2026-01-05T23:59:59+00:00",
+      "scans": 2,
+      "total_findings": 3,
+      "by_severity": {"high": 2, "medium": 1, "low": 0},
+      "open_findings": 3,
+      "high_open": 2,
+      "suppressed": 0,
+      "workspaces": [
+        {
+          "workspace": "ws1",
+          "scans": 1,
+          "total_findings": 3,
+          "by_severity": {"high": 2, "medium": 1, "low": 0},
+          "open_findings": 3,
+          "high_open": 2,
+          "suppressed": 0,
+          "delta_high": 0
+        },
+        {
+          "workspace": "ws2",
+          "scans": 1,
+          "total_findings": 0,
+          "by_severity": {"high": 0, "medium": 0, "low": 0},
+          "open_findings": 0,
+          "high_open": 0,
+          "suppressed": 0,
+          "delta_high": 0
+        }
+      ]
+    }
+  ],
+  "workspaces": [
+    {
+      "workspace": "ws1",
+      "scans": 1,
+      "total_findings": 3,
+      "by_severity": {"high": 2, "medium": 1, "low": 0},
+      "open_findings": 3,
+      "high_open": 2,
+      "suppressed": 0,
+      "delta_high": 0
+    }
+  ],
+  "summary": {
+    "scans": 2,
+    "buckets": 1,
+    "total_findings": 3,
+    "by_severity": {"high": 2, "medium": 1, "low": 0},
+    "open_findings": 3,
+    "high_open": 2,
+    "suppressed": 0,
+    "delta_high": 0,
+    "workspaces": 2
+  }
+}
+```
+
+- Each bucket adds a `workspaces` breakdown aggregated per workspace and sorted
+  by descending `high_open` then workspace name (scans with no workspace appear
+  under the empty-string bucket), mirroring the top-level `workspaces` list that
+  aggregates the whole window.
+- `summary` aggregates the window plus `delta_high` and a distinct-`workspaces`
+  count. `bucket`/`limit` validation and malformed-scan skipping match the
+  per-workspace route; on an empty store the response is HTTP 200 with empty
+  `buckets`/`workspaces` and a zeroed `summary`.
+- Both routes are bounded (`bucket` is `day`/`week` only and `limit` buckets are
+  clamped to `1..50`, default `10`), UTC-only, and have no date-range filter or
+  pagination.
 
 ### Pull-request suggestion
 
