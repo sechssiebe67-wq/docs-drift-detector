@@ -129,22 +129,49 @@ class Scheduler:
         if not workspace or not isinstance(scan, dict):
             return False
         try:
-            config = self.store.get_workspace_webhook(workspace)
-            url = config.get("url") or ""
-            if not url:
-                return False
-            payload = notify.build_digest(scan, previous)
-            result = notify.dispatch(url, payload)
-            if not result.get("ok"):
-                sys.stderr.write(
-                    "docs-drift: schedule digest delivery failed "
-                    "(workspace=%s, url=%s): %s\n"
-                    % (workspace, url, result.get("error") or result.get("status"))
-                )
-            return True
-        except Exception as err:  # never let delivery break the loop
+            digest = notify.build_digest(scan, previous)
+        except Exception as err:  # never let digest building break the loop
             sys.stderr.write("docs-drift: schedule digest error: %s\n" % err)
             return False
+        delivery: Dict[str, Any] = {
+            "ok": False,
+            "status": None,
+            "error": "no webhook configured",
+        }
+        sent = False
+        try:
+            config = self.store.get_workspace_webhook(workspace)
+            url = config.get("url") or ""
+            if url:
+                delivery = notify.dispatch(url, digest)
+                sent = True
+                if not delivery.get("ok"):
+                    sys.stderr.write(
+                        "docs-drift: schedule digest delivery failed "
+                        "(workspace=%s, url=%s): %s\n"
+                        % (workspace, url, delivery.get("error") or delivery.get("status"))
+                    )
+        except Exception as err:  # never let delivery break the loop
+            sys.stderr.write("docs-drift: schedule digest error: %s\n" % err)
+            delivery = {
+                "ok": False,
+                "status": None,
+                "error": str(err) or err.__class__.__name__,
+            }
+        self._record_digest(workspace, digest, delivery)
+        return sent
+
+    def _record_digest(
+        self, workspace: str, digest: Dict[str, Any], delivery: Dict[str, Any]
+    ) -> None:
+        """Best-effort persistence of a digest attempt for later auditing."""
+        try:
+            self.store.record_workspace_digest(workspace, digest, delivery)
+        except Exception as err:  # recording must never break the loop
+            sys.stderr.write(
+                "docs-drift: failed to record digest (workspace=%s): %s\n"
+                % (workspace, err)
+            )
 
     def start(self) -> threading.Thread:
         if self._thread is not None:

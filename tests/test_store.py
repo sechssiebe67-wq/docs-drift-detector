@@ -6,7 +6,23 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from docs_drift_detector.store import MAX_RULE_HISTORY, Store  # noqa: E402
+from docs_drift_detector.store import (  # noqa: E402
+    MAX_DIGEST_HISTORY,
+    MAX_RULE_HISTORY,
+    Store,
+)
+
+
+def _digest(scan_id="s1", total=2, high=1, medium=1, low=0, new_high=0):
+    return {
+        "scan_id": scan_id,
+        "workspace": "ws1",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "total_findings": total,
+        "by_severity": {"high": high, "medium": medium, "low": low},
+        "new_high": [{"id": "f%d" % index} for index in range(new_high)],
+        "url": "/api/scans/%s" % scan_id,
+    }
 
 
 def _finding(fid="abc", severity="high"):
@@ -607,6 +623,134 @@ class StoreTest(unittest.TestCase):
         schedules = reopened.list_workspace_schedules()
         self.assertEqual([c["workspace"] for c in schedules], ["ws3"])
         self.assertEqual(schedules[0]["scan"]["name"], "Keep")
+
+    def test_workspace_digest_record_newest_first(self):
+        self.store.record_workspace_digest(
+            "ws1", _digest("s1"), {"ok": True, "status": 200, "error": ""}
+        )
+        second = self.store.record_workspace_digest(
+            "ws1", _digest("s2"), {"ok": True, "status": 200, "error": ""}
+        )
+        self.assertEqual(second["scan_id"], "s2")
+        self.assertEqual(second["total_findings"], 2)
+        self.assertEqual(second["by_severity"], {"high": 1, "medium": 1, "low": 0})
+        self.assertEqual(second["new_high_count"], 0)
+        self.assertTrue(second["delivery_ok"])
+        self.assertEqual(second["delivery_error"], "")
+        self.assertTrue(second["created_at"])
+        history = self.store.list_workspace_digests("ws1")
+        self.assertEqual([entry["scan_id"] for entry in history], ["s2", "s1"])
+
+    def test_workspace_digest_records_delivery_failure(self):
+        entry = self.store.record_workspace_digest(
+            "ws1", _digest("s1"), {"ok": False, "status": 500, "error": "HTTP 500"}
+        )
+        self.assertFalse(entry["delivery_ok"])
+        self.assertEqual(entry["delivery_error"], "HTTP 500")
+
+    def test_workspace_digest_counts_new_high(self):
+        entry = self.store.record_workspace_digest(
+            "ws1", _digest("s1", new_high=3), {"ok": True, "error": ""}
+        )
+        self.assertEqual(entry["new_high_count"], 3)
+
+    def test_workspace_digest_history_capped(self):
+        for index in range(MAX_DIGEST_HISTORY + 5):
+            self.store.record_workspace_digest(
+                "ws1",
+                _digest("s%d" % index),
+                {"ok": True, "status": 200, "error": ""},
+            )
+        history = self.store.list_workspace_digests("ws1", limit=MAX_DIGEST_HISTORY)
+        self.assertEqual(len(history), MAX_DIGEST_HISTORY)
+        self.assertEqual(history[0]["scan_id"], "s%d" % (MAX_DIGEST_HISTORY + 4))
+        self.assertEqual(history[-1]["scan_id"], "s5")
+
+    def test_workspace_digest_list_respects_limit(self):
+        for index in range(5):
+            self.store.record_workspace_digest(
+                "ws1", _digest("s%d" % index), {"ok": True, "error": ""}
+            )
+        self.assertEqual(len(self.store.list_workspace_digests("ws1", limit=2)), 2)
+        self.assertEqual(
+            [entry["scan_id"] for entry in self.store.list_workspace_digests("ws1", limit=2)],
+            ["s4", "s3"],
+        )
+        self.assertEqual(len(self.store.list_workspace_digests("ws1", limit=0)), 5)
+
+    def test_workspace_digest_persists_across_instances(self):
+        self.store.record_workspace_digest(
+            "ws1", _digest("s1"), {"ok": True, "status": 200, "error": ""}
+        )
+        reopened = Store(self.path)
+        history = reopened.list_workspace_digests("ws1")
+        self.assertEqual([entry["scan_id"] for entry in history], ["s1"])
+        self.assertTrue(history[0]["delivery_ok"])
+
+    def test_old_store_without_digests_key_loads_empty(self):
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write('{"scans": {}}')
+        reopened = Store(self.path)
+        self.assertEqual(reopened.list_workspace_digests("ws1"), [])
+        reopened.record_workspace_digest("ws1", _digest("s1"), {"ok": True, "error": ""})
+        self.assertEqual(len(reopened.list_workspace_digests("ws1")), 1)
+
+    def test_malformed_digests_key_is_tolerated(self):
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "scans": {"s1": {"id": "s1", "name": "Old", "stats": {}}},
+                        "workspace_digests": {
+                            "ws1": "nonsense",
+                            "ws2": [5, None, {"scan_id": "keep"}],
+                            "ws3": [
+                                {
+                                    "created_at": "2026-01-01T00:00:00+00:00",
+                                    "scan_id": "ok",
+                                    "total_findings": 3,
+                                    "by_severity": {"high": 2, "medium": 1},
+                                    "new_high_count": 1,
+                                    "delivery_ok": False,
+                                    "delivery_error": "HTTP 500",
+                                }
+                            ],
+                            "bad id!": [{"scan_id": "x"}],
+                        },
+                    }
+                )
+            )
+        reopened = Store(self.path)
+        self.assertIsNotNone(reopened.get_scan("s1"))
+        self.assertEqual(reopened.list_workspace_digests("ws1"), [])
+        self.assertEqual(
+            reopened.list_workspace_digests("ws2"),
+            [
+                {
+                    "created_at": "",
+                    "scan_id": "keep",
+                    "total_findings": 0,
+                    "by_severity": {"high": 0, "medium": 0, "low": 0},
+                    "new_high_count": 0,
+                    "delivery_ok": False,
+                    "delivery_error": "",
+                }
+            ],
+        )
+        ws3 = reopened.list_workspace_digests("ws3")
+        self.assertEqual(ws3[0]["scan_id"], "ok")
+        self.assertEqual(ws3[0]["by_severity"], {"high": 2, "medium": 1, "low": 0})
+        self.assertEqual(ws3[0]["delivery_error"], "HTTP 500")
+        self.assertEqual(reopened.list_workspace_digests("wsNever"), [])
+
+    def test_workspace_digest_rejects_invalid_names(self):
+        for bad in ("bad id!", "", "a" * 65, "a/b", None):
+            with self.assertRaises(ValueError):
+                self.store.list_workspace_digests(bad)
+            with self.assertRaises(ValueError):
+                self.store.record_workspace_digest(
+                    bad, _digest("s1"), {"ok": True, "error": ""}
+                )
 
     def test_workspace_retention_crud(self):
         self.assertEqual(self.store.get_workspace_retention("ws1"), 0)

@@ -146,6 +146,21 @@ manual review marathon.
   scheduler through `GET /api/schedule/status` (`enabled`, `tick_seconds`,
   `due`, `schedules`). A schedule that fires with no changes still produces a
   stored scan with zero new high-severity findings and never fails.
+- **Per-workspace digest history.** Every scheduled scan that builds a digest
+  appends a bounded, append-only entry to a per-workspace history
+  (`MAX_DIGEST_HISTORY = 20` entries per workspace, oldest dropped) stored with
+  the scans in the same JSON file under `workspace_digests`. Each entry records
+  `created_at` (UTC ISO-8601), `scan_id`, `total_findings`, `by_severity`,
+  `new_high_count`, `delivery_ok` and `delivery_error`, so a documentation lead
+  can audit what the scheduler POSTed, when, and how many new high-severity
+  findings it carried instead of relying only on the receiver's logs.
+  `GET /api/workspaces/{ws}/digests` lists the most recent entries newest-first
+  and honours an optional integer `limit` (default `10`, clamped to `1..20`);
+  an invalid workspace id returns HTTP 400 and an unknown workspace returns
+  HTTP 200 with an empty list. Recording is best-effort: a missing, failing or
+  erroring webhook still records the digest attempt with `delivery_ok: false`
+  (and a non-empty `delivery_error`) and never changes the stored scan or stops
+  the scheduler.
 - **Per-workspace scan retention.** A workspace can cap how many stored scans it
   keeps (`GET`/`PUT`/`DELETE /api/workspaces/{ws}/retention`, with
   `max_scans` in `0..10000`; `0` clears the policy and an unset workspace
@@ -175,14 +190,16 @@ release-to-docs comparison with text and screenshot matching.
   connector** now opens that branch/PR autonomously, pushing the exported
   checklist with the same high-severity scope. The **per-workspace scan
   retention** policy now caps unbounded store growth by pruning the oldest scans
-  after each stored scan. What remains is broader connector coverage and making
-  repositories first-class per-workspace objects.
+  after each stored scan, and the **per-workspace digest history** now makes
+  scheduled digests auditable after the fact. What remains is broader connector
+  coverage and making repositories first-class per-workspace objects.
 - Screenshot diffing with per-region highlighting instead of change signals.
 - Pluggable connectors for GitHub commit ranges and rendered docs sites.
 - Per-workspace repositories and doc-page quotas for the tiered SaaS plan.
-- Richer scheduling: cron expressions, per-workspace time zones and
-  multi-process/durable job execution instead of the single in-process
-  scheduler thread shipped now.
+- Richer scheduling: the per-workspace digest history is now shipped, so the
+  remaining scheduling gap is durable/multi-process execution (a restart still
+  skips missed ticks) and cron expressions with per-workspace time zones
+  instead of whole-hour intervals.
 
 ## Non-goals and known limits
 
@@ -208,6 +225,10 @@ release-to-docs comparison with text and screenshot matching.
 - Scan retention prunes whole scans oldest-first and is keyed by workspace only:
   scans without a workspace are never pruned, there is no time-based expiry, and
   the remaining scans still live in the single JSON store rather than a database.
+- The digest history is bounded and stored in the single JSON file, keyed by
+  workspace only: there is no pagination, no time-based expiry and no cross-
+  workspace or global view, and the oldest entry is dropped once
+  `MAX_DIGEST_HISTORY = 20` is reached.
 
 ## Revenue hypothesis
 
