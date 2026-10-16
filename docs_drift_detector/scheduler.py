@@ -137,14 +137,15 @@ class Scheduler:
             "ok": False,
             "status": None,
             "error": "no webhook configured",
+            "attempts": 0,
         }
         sent = False
         try:
             config = self.store.get_workspace_webhook(workspace)
             url = config.get("url") or ""
             if url:
-                delivery = notify.dispatch(url, digest)
-                sent = True
+                delivery = notify.dispatch_with_retry(url, digest)
+                sent = bool(delivery.get("ok"))
                 if not delivery.get("ok"):
                     sys.stderr.write(
                         "docs-drift: schedule digest delivery failed "
@@ -157,6 +158,7 @@ class Scheduler:
                 "ok": False,
                 "status": None,
                 "error": str(err) or err.__class__.__name__,
+                "attempts": 0,
             }
         self._record_digest(workspace, digest, delivery)
         return sent

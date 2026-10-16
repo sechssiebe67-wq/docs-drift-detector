@@ -746,6 +746,7 @@ class StoreTest(unittest.TestCase):
                     "new_high_count": 0,
                     "delivery_ok": False,
                     "delivery_error": "",
+                    "attempts": 0,
                 }
             ],
         )

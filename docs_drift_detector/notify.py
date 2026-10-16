@@ -9,11 +9,18 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import time
 import urllib.error
 import urllib.request
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 DEFAULT_TIMEOUT = 5
+DEFAULT_RETRIES = 3
+DEFAULT_BACKOFF = 0.5
+
+RETRIES_ENV = "DDR_WEBHOOK_RETRIES"
+BACKOFF_ENV = "DDR_WEBHOOK_BACKOFF"
 
 _FINDING_FIELDS = (
     "id",
@@ -146,17 +153,24 @@ def _status_of(response: Any) -> Any:
     return status if isinstance(status, int) else None
 
 
-def dispatch(url: str, payload: Dict[str, Any], timeout: float = DEFAULT_TIMEOUT) -> Dict[str, Any]:
+def dispatch(
+    url: str,
+    payload: Dict[str, Any],
+    timeout: float = DEFAULT_TIMEOUT,
+    opener: Optional[Callable[..., Any]] = None,
+) -> Dict[str, Any]:
     """POST ``payload`` as JSON to ``url`` once.
 
     Returns ``{"ok": bool, "status": int | None, "error": str}`` and never
-    raises for network or HTTP errors, so callers can ignore the result.
+    raises for network or HTTP errors, so callers can ignore the result. The
+    optional ``opener`` overrides the module-level :data:`_opener` (used to
+    inject a fake transport in tests).
     """
     try:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(url, data=body, method="POST")
         request.add_header("Content-Type", "application/json")
-        response = _opener(request, timeout)
+        response = (opener or _opener)(request, timeout)
         status = _status_of(response)
         try:
             response.close()
@@ -170,3 +184,118 @@ def dispatch(url: str, payload: Dict[str, Any], timeout: float = DEFAULT_TIMEOUT
     ok = status is None or (200 <= status < 300)
     error = "" if ok else ("HTTP %s" % status if status is not None else "request failed")
     return {"ok": ok, "status": status, "error": error}
+
+
+def default_attempts() -> int:
+    """Total POST attempts, from ``DDR_WEBHOOK_RETRIES`` (default ``3``).
+
+    A missing, non-integer or non-positive value falls back to the default.
+    """
+    try:
+        value = int(os.environ.get(RETRIES_ENV))
+    except (TypeError, ValueError):
+        return DEFAULT_RETRIES
+    if isinstance(value, bool) or value < 1:
+        return DEFAULT_RETRIES
+    return value
+
+
+def default_backoff() -> float:
+    """Base backoff seconds, from ``DDR_WEBHOOK_BACKOFF`` (default ``0.5``).
+
+    A missing, non-numeric, non-finite or non-positive value falls back to the
+    default.
+    """
+    try:
+        value = float(os.environ.get(BACKOFF_ENV))
+    except (TypeError, ValueError):
+        return DEFAULT_BACKOFF
+    if not math.isfinite(value) or value <= 0:
+        return DEFAULT_BACKOFF
+    return value
+
+
+def dispatch_with_retry(
+    url: str,
+    payload: Dict[str, Any],
+    attempts: Optional[int] = None,
+    backoff: Optional[float] = None,
+    sleep: Callable[[float], Any] = time.sleep,
+    opener: Optional[Callable[..., Any]] = None,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> Dict[str, Any]:
+    """POST ``payload`` to ``url`` with bounded exponential-backoff retries.
+
+    Performs at most ``attempts`` POSTs (default
+    :func:`default_attempts`/``DDR_WEBHOOK_RETRIES``), sleeping ``backoff``
+    (default :func:`default_backoff`/``DDR_WEBHOOK_BACKOFF``) seconds before the
+    first retry and doubling the delay for each subsequent retry. ``sleep`` and
+    ``opener`` are injectable so tests can avoid real waiting and networking.
+
+    Returns ``{"ok", "attempts", "status", "error"}`` where ``attempts`` is the
+    number of POSTs actually made and ``error`` is the last error (empty on
+    success). Delivery is best-effort: the function never raises into its
+    caller.
+    """
+    total = default_attempts() if attempts is None else _positive_int(attempts)
+    delay = default_backoff() if backoff is None else _positive_float(backoff)
+
+    made = 0
+    error = ""
+    status: Any = None
+    while made < total:
+        made += 1
+        try:
+            if opener is None:
+                result = dispatch(url, payload, timeout=timeout)
+            else:
+                result = dispatch(url, payload, timeout=timeout, opener=opener)
+        except Exception as err:  # defensive: dispatch should never raise
+            result = {
+                "ok": False,
+                "status": None,
+                "error": str(err) or err.__class__.__name__,
+            }
+        if not isinstance(result, dict):
+            result = {"ok": False, "status": None, "error": "invalid dispatch result"}
+        if result.get("ok"):
+            return {
+                "ok": True,
+                "attempts": made,
+                "status": result.get("status"),
+                "error": "",
+            }
+        error = result.get("error") or ""
+        status = result.get("status")
+        if made < total:
+            try:
+                sleep(delay * (2 ** (made - 1)))
+            except Exception as err:  # defensive: a broken sleep must not raise
+                error = error or str(err) or err.__class__.__name__
+                break
+    return {
+        "ok": False,
+        "attempts": made,
+        "status": status,
+        "error": error or "request failed",
+    }
+
+
+def _positive_int(value: Any) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_RETRIES
+    if isinstance(value, bool) or number < 1:
+        return DEFAULT_RETRIES
+    return number
+
+
+def _positive_float(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_BACKOFF
+    if not math.isfinite(number) or number <= 0:
+        return DEFAULT_BACKOFF
+    return number

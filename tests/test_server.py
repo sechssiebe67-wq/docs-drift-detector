@@ -848,6 +848,7 @@ class ServerTest(unittest.TestCase):
                 "new_high_count",
                 "delivery_ok",
                 "delivery_error",
+                "attempts",
             },
         )
         self.assertEqual(set(entry["by_severity"]), {"high", "medium", "low"})

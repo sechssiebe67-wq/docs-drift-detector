@@ -3,6 +3,7 @@ import os
 import sys
 import unittest
 import urllib.error
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -205,6 +206,122 @@ class DispatchTest(unittest.TestCase):
         result = notify.dispatch("https://hooks.example.com/ddr", {})
         self.assertFalse(result["ok"])
         self.assertEqual(result["status"], 503)
+
+
+class DispatchWithRetryTest(unittest.TestCase):
+    @staticmethod
+    def _failing_then_ok(fail_times):
+        calls = {"n": 0}
+
+        def opener(request, timeout):
+            calls["n"] += 1
+            if calls["n"] <= fail_times:
+                raise urllib.error.URLError("boom %d" % calls["n"])
+            return _FakeResponse(200)
+
+        return opener, calls
+
+    def test_success_on_first_attempt_makes_one_post(self):
+        opener, calls = self._failing_then_ok(0)
+        sleeps = []
+        result = notify.dispatch_with_retry(
+            "https://hooks.example.com/ddr", {}, attempts=3, sleep=sleeps.append, opener=opener
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["attempts"], 1)
+        self.assertEqual(result["error"], "")
+        self.assertEqual(calls["n"], 1)
+        self.assertEqual(sleeps, [])
+
+    def test_success_after_one_retry_sleeps_once(self):
+        opener, calls = self._failing_then_ok(1)
+        sleeps = []
+        result = notify.dispatch_with_retry(
+            "https://hooks.example.com/ddr",
+            {},
+            attempts=3,
+            backoff=0.5,
+            sleep=sleeps.append,
+            opener=opener,
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["attempts"], 2)
+        self.assertEqual(calls["n"], 2)
+        self.assertEqual(sleeps, [0.5])
+
+    def test_exhaustion_returns_last_error_and_counts_attempts(self):
+        opener, calls = self._failing_then_ok(99)
+        sleeps = []
+        result = notify.dispatch_with_retry(
+            "https://hooks.example.com/ddr",
+            {},
+            attempts=3,
+            backoff=0.5,
+            sleep=sleeps.append,
+            opener=opener,
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["attempts"], 3)
+        self.assertEqual(calls["n"], 3)
+        self.assertEqual(sleeps, [0.5, 1.0])
+        self.assertTrue(result["error"])
+
+    def test_never_raises_when_opener_explodes(self):
+        def opener(request, timeout):
+            raise RuntimeError("kaboom")
+
+        result = notify.dispatch_with_retry(
+            "https://hooks.example.com/ddr",
+            {},
+            attempts=2,
+            sleep=lambda _delay: None,
+            opener=opener,
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["attempts"], 2)
+        self.assertIn("kaboom", result["error"])
+
+    def test_env_defaults_control_retries_and_backoff(self):
+        opener, calls = self._failing_then_ok(99)
+        sleeps = []
+        with mock.patch.dict(
+            os.environ,
+            {"DDR_WEBHOOK_RETRIES": "2", "DDR_WEBHOOK_BACKOFF": "0.1"},
+        ):
+            result = notify.dispatch_with_retry(
+                "https://hooks.example.com/ddr", {}, sleep=sleeps.append, opener=opener
+            )
+        self.assertEqual(result["attempts"], 2)
+        self.assertEqual(calls["n"], 2)
+        self.assertEqual(sleeps, [0.1])
+
+    def test_invalid_env_falls_back_to_defaults(self):
+        for bad_retries in ("abc", "0", "-3"):
+            with self.subTest(bad_retries=bad_retries):
+                opener, calls = self._failing_then_ok(99)
+                sleeps = []
+                with mock.patch.dict(
+                    os.environ,
+                    {
+                        "DDR_WEBHOOK_RETRIES": bad_retries,
+                        "DDR_WEBHOOK_BACKOFF": "not-a-number",
+                    },
+                ):
+                    result = notify.dispatch_with_retry(
+                        "https://hooks.example.com/ddr",
+                        {},
+                        sleep=sleeps.append,
+                        opener=opener,
+                    )
+                self.assertEqual(result["attempts"], 3)
+                self.assertEqual(calls["n"], 3)
+                self.assertEqual(sleeps, [0.5, 1.0])
+
+    def test_dispatch_accepts_injected_opener(self):
+        opener, calls = self._failing_then_ok(0)
+        result = notify.dispatch("https://hooks.example.com/ddr", {"a": 1}, opener=opener)
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls["n"], 1)
 
 
 if __name__ == "__main__":
