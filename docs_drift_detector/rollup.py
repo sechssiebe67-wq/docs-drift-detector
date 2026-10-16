@@ -19,13 +19,18 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import timewindow
+from . import pagination, timewindow
 from .trend import (
     DEFAULT_LIMIT,
     _clamp_limit,
     _zero_severity,
     summarise_scan,
 )
+
+
+def _entry_key(entry: Dict[str, Any]) -> tuple:
+    """Return the stable cursor sort key ``(created_at, scan_id)`` for an entry."""
+    return (str(entry.get("created_at") or ""), str(entry.get("scan_id") or ""))
 
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
@@ -116,6 +121,7 @@ def build_rollup(
     limit: int = DEFAULT_LIMIT,
     from_time: Optional[datetime] = None,
     to_time: Optional[datetime] = None,
+    cursor: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build the cross-workspace drift roll-up document.
 
@@ -130,15 +136,19 @@ def build_rollup(
     ``workspaces`` and ``summary`` alike. Either side may be ``None`` to leave
     that end unbounded.
 
-    The returned ``scans`` window holds up to ``limit`` of the most recent
-    valid scans ordered oldest-first; each entry adds the scan's ``workspace``
-    (empty string when unset) to the shared per-scan summary. ``workspaces``
-    aggregates the window per workspace, sorted by descending ``high_open`` then
-    workspace name, and ``summary`` aggregates the whole window. Both
-    ``delta_high`` fields are ``newest.high_open - oldest.high_open`` (``0``
-    when fewer than two relevant scans are present).
+    The returned ``scans`` window holds up to ``limit`` valid scans ordered
+    oldest-first. Without a ``cursor`` it is the most recent window exactly as
+    before; with one it is the ``limit`` scans immediately older than the
+    cursor's anchor. ``next_cursor`` is the opaque cursor for the oldest scan on
+    the page, or ``None`` on the last page. Each entry adds the scan's
+    ``workspace`` (empty string when unset) to the shared per-scan summary.
+    ``workspaces`` aggregates the window per workspace, sorted by descending
+    ``high_open`` then workspace name, and ``summary`` aggregates the whole
+    window. Both ``delta_high`` fields are
+    ``newest.high_open - oldest.high_open`` (``0`` when fewer than two relevant
+    scans are present). A malformed ``cursor`` raises
+    :class:`docs_drift_detector.pagination.CursorError`.
     """
-    bounded = _clamp_limit(limit)
     if not isinstance(scans, list):
         scans = []
     valid: List[Tuple[datetime, int, Dict[str, Any]]] = []
@@ -159,10 +169,11 @@ def build_rollup(
     # ``scans`` is newest-first, so for equal timestamps the earlier input index
     # is newer; ``-index`` makes the oldest-first sort stable under that rule.
     valid.sort(key=lambda item: (item[0], -item[1]))
-    window = valid[-bounded:]
-    entries = [entry for _, _, entry in window]
+    ordered = [entry for _, _, entry in valid]
+    page, next_cursor = pagination.paginate(ordered, cursor, limit, _entry_key)
     return {
-        "scans": entries,
-        "workspaces": _workspaces(entries),
-        "summary": _summary(entries),
+        "scans": page,
+        "workspaces": _workspaces(page),
+        "summary": _summary(page),
+        "next_cursor": next_cursor,
     }

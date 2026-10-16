@@ -378,7 +378,7 @@ class RollupServerTest(unittest.TestCase):
         status, document = self._request("GET", "/api/trend")
         self.assertEqual(status, 200)
         self.assertEqual(
-            set(document), {"scans", "workspaces", "summary"}
+            set(document), {"scans", "workspaces", "summary", "next_cursor"}
         )
         buckets = {entry["workspace"] for entry in document["workspaces"]}
         self.assertEqual(buckets, {"wsRoll1", "wsRoll2", ""})

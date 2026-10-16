@@ -26,7 +26,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import rollup, timewindow
+from . import pagination, rollup, timewindow
 from .trend import DEFAULT_LIMIT, _clamp_limit, summarise_scan
 
 BUCKETS = ("day", "week")
@@ -160,11 +160,27 @@ def _summary(
     return summary
 
 
-def _window(valid: List[Tuple[datetime, int, Dict[str, Any]]], bucket: str, limit: Any) -> List[Dict[str, Any]]:
-    """Return the most recent ``limit`` bucket records, oldest-first."""
-    bounded = _clamp_limit(limit)
+def _bucket_key(record: Dict[str, Any]) -> Tuple[str, str]:
+    """Return the stable cursor sort key ``(start, key)`` for a bucket record."""
+    return (_iso(record["start"]), str(record.get("key") or ""))
+
+
+def _window(
+    valid: List[Tuple[datetime, int, Dict[str, Any]]],
+    bucket: str,
+    limit: Any,
+    cursor: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """Return ``(window, next_cursor)`` of the most recent pages, oldest-first.
+
+    ``window`` holds up to ``limit`` bucket records ordered oldest-first: the
+    most recent buckets without a ``cursor``, or the ``limit`` buckets
+    immediately older than the cursor anchor otherwise. ``next_cursor`` is the
+    opaque cursor for the oldest bucket on the page, or ``None`` on the last
+    page.
+    """
     records = sorted(_group(valid, bucket), key=lambda record: record["start"])
-    return records[-bounded:]
+    return pagination.paginate(records, cursor, limit, _bucket_key)
 
 
 def build_workspace_buckets(
@@ -174,6 +190,7 @@ def build_workspace_buckets(
     limit: int = DEFAULT_LIMIT,
     from_time: Optional[datetime] = None,
     to_time: Optional[datetime] = None,
+    cursor: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build the per-workspace time-bucketed trend document.
 
@@ -183,17 +200,23 @@ def build_workspace_buckets(
     outside it before bucketing (either side may be ``None``). Malformed scans
     are skipped and ``limit`` (clamped into ``1..50``) bounds the number of
     buckets, keeping the most recent ones but presenting them **oldest-first**.
-    ``summary`` aggregates the window and sets ``delta_high`` to ``newest bucket
-    high_open - oldest bucket high_open`` (``0`` when fewer than two buckets are
-    in the window).
+    Without a ``cursor`` the most recent ``limit`` buckets are returned exactly
+    as before; with one, the ``limit`` buckets immediately older than the
+    cursor's anchor are returned. ``next_cursor`` is the opaque cursor for the
+    oldest bucket on the page, or ``None`` on the last page. ``summary``
+    aggregates the page and sets ``delta_high`` to ``newest bucket high_open -
+    oldest bucket high_open`` (``0`` when fewer than two buckets are in the
+    page). A malformed ``cursor`` raises
+    :class:`docs_drift_detector.pagination.CursorError`.
     """
     valid = _valid_entries(scans, from_time=from_time, to_time=to_time)
-    window = _window(valid, bucket, limit)
+    window, next_cursor = _window(valid, bucket, limit, cursor)
     return {
         "workspace": workspace,
         "bucket": bucket,
         "buckets": [_bucket_doc(record) for record in window],
         "summary": _summary(window),
+        "next_cursor": next_cursor,
     }
 
 
@@ -203,6 +226,7 @@ def build_rollup_buckets(
     limit: int = DEFAULT_LIMIT,
     from_time: Optional[datetime] = None,
     to_time: Optional[datetime] = None,
+    cursor: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build the cross-workspace time-bucketed drift roll-up.
 
@@ -214,12 +238,17 @@ def build_rollup_buckets(
     name, the top-level ``workspaces`` list aggregates the whole window the same
     way, and ``summary`` aggregates the window plus the bucket-level
     ``delta_high`` and a distinct-workspace count. Malformed scans are skipped
-    and ``limit`` (clamped into ``1..50``) bounds the number of buckets.
+    and ``limit`` (clamped into ``1..50``) bounds the number of buckets. Without
+    a ``cursor`` the most recent ``limit`` buckets are returned exactly as
+    before; with one, the ``limit`` buckets immediately older than the cursor's
+    anchor are returned and ``next_cursor`` is the opaque cursor for the oldest
+    bucket on the page (``None`` on the last page). A malformed ``cursor``
+    raises :class:`docs_drift_detector.pagination.CursorError`.
     """
     valid = _valid_entries(
         scans, with_workspace=True, from_time=from_time, to_time=to_time
     )
-    window = _window(valid, bucket, limit)
+    window, next_cursor = _window(valid, bucket, limit, cursor)
     documents = []
     for record in window:
         document = _bucket_doc(record)
@@ -232,4 +261,5 @@ def build_rollup_buckets(
         "buckets": documents,
         "workspaces": rollup._workspaces(entries),
         "summary": _summary(window, {"workspaces": workspaces}),
+        "next_cursor": next_cursor,
     }

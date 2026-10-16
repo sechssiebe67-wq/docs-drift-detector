@@ -11,7 +11,18 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import analyze, buckets, export, github, pullrequest, rollup, runner, timewindow, trend
+from . import (
+    analyze,
+    buckets,
+    export,
+    github,
+    pagination,
+    pullrequest,
+    rollup,
+    runner,
+    timewindow,
+    trend,
+)
 from .store import (
     DEFAULT_GITHUB_TOKEN_ENV,
     MAX_DIGEST_HISTORY,
@@ -145,6 +156,25 @@ class Handler(BaseHTTPRequestHandler):
                 return None, None
         return bucket, limit
 
+    def _cursor_option(self) -> Optional[str]:
+        """Parse the optional opaque ``cursor`` query value.
+
+        Returns the cursor string, or ``None`` when it is absent or blank (a
+        blank cursor is treated as absent, matching the ``from``/``to``
+        handling). Whether the cursor is *well-formed* is validated by the
+        pagination helper, so a malformed value surfaces as HTTP 400 at the
+        call site.
+        """
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlparse(self.path).query, keep_blank_values=True
+        )
+        if "cursor" not in query:
+            return None
+        value = query["cursor"][0]
+        if not isinstance(value, str) or not value.strip():
+            return None
+        return value
+
     def _window_options(
         self,
     ) -> Optional[Tuple[Optional[datetime], Optional[datetime]]]:
@@ -242,12 +272,18 @@ class Handler(BaseHTTPRequestHandler):
             if window is None:
                 return self._error(400, "invalid from or to")
             start, end = window
-            return self._json(
-                200,
-                trend.build_trend(
-                    self.server.store, parts[2], limit, from_time=start, to_time=end
-                ),
-            )
+            try:
+                document = trend.build_trend(
+                    self.server.store,
+                    parts[2],
+                    limit,
+                    from_time=start,
+                    to_time=end,
+                    cursor=self._cursor_option(),
+                )
+            except pagination.CursorError:
+                return self._error(400, "invalid cursor")
+            return self._json(200, document)
         if (
             len(parts) == 5
             and parts[:2] == ["api", "workspaces"]
@@ -264,17 +300,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, "invalid from or to")
             start, end = window
             scans = self.server.store.list_workspace_scans(parts[2])
-            return self._json(
-                200,
-                buckets.build_workspace_buckets(
+            try:
+                document = buckets.build_workspace_buckets(
                     scans,
                     parts[2],
                     bucket=bucket,
                     limit=limit,
                     from_time=start,
                     to_time=end,
-                ),
-            )
+                    cursor=self._cursor_option(),
+                )
+            except pagination.CursorError:
+                return self._error(400, "invalid cursor")
+            return self._json(200, document)
         if parts == ["api", "schedule", "status"]:
             return self._schedule_status()
         if (
@@ -321,16 +359,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, "invalid from or to")
             start, end = window
             scans = self.server.store.list_all_scans()
-            return self._json(
-                200,
-                buckets.build_rollup_buckets(
+            try:
+                document = buckets.build_rollup_buckets(
                     scans,
                     bucket=bucket,
                     limit=limit,
                     from_time=start,
                     to_time=end,
-                ),
-            )
+                    cursor=self._cursor_option(),
+                )
+            except pagination.CursorError:
+                return self._error(400, "invalid cursor")
+            return self._json(200, document)
         if parts == ["api", "trend"]:
             query = urllib.parse.parse_qs(
                 urllib.parse.urlparse(self.path).query, keep_blank_values=True
@@ -346,10 +386,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, "invalid from or to")
             start, end = window
             scans = self.server.store.list_all_scans()
-            return self._json(
-                200,
-                rollup.build_rollup(scans, limit, from_time=start, to_time=end),
-            )
+            try:
+                document = rollup.build_rollup(
+                    scans, limit, from_time=start, to_time=end,
+                    cursor=self._cursor_option(),
+                )
+            except pagination.CursorError:
+                return self._error(400, "invalid cursor")
+            return self._json(200, document)
         if parts == ["api", "scans"]:
             return self._json(200, {"scans": self.server.store.list_scans()})
         if len(parts) == 4 and parts[:2] == ["api", "scans"] and parts[3] == "suppressed":

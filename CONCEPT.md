@@ -236,6 +236,27 @@ manual review marathon.
   a shared, dependency-free helper (`docs_drift_detector/timewindow.py`), and the
   endpoints stay strictly read-only with the same malformed-scan skipping as
   before.
+- **Cursor-based pagination on the drift trend.** All four read-only trend
+  endpoints (`GET /api/workspaces/{ws}/trend`,
+  `GET /api/workspaces/{ws}/trend/buckets`, `GET /api/trend`,
+  `GET /api/trend/buckets`) accept an optional opaque `cursor` query parameter
+  and return a `next_cursor` field (`null` on the last page), so a documentation
+  lead can page further back to an older release window once the most recent
+  `limit` scans or buckets are exhausted. Without a cursor the response keeps
+  the previous `scans`/`buckets`/`workspaces`/`summary` payload byte-for-byte
+  (the most recent `limit` items, `limit` clamped to `1..50`) and only adds
+  `next_cursor`; following the cursor walks *backwards* in time, each page
+  still oldest-first, so a client that prepends successive pages reconstructs
+  the full chronological series. The cursor is a URL-safe base64 of the item's
+  sort key (`created_at` plus a stable tiebreaker for scans, the bucket `start`
+  plus key for buckets, never an offset index), so an item inserted between
+  requests does not shift older pages. `from`/`to` filtering and `bucket`
+  selection apply *before* pagination; a malformed cursor returns HTTP 400 on
+  all four endpoints and a well-formed but unknown/expired cursor returns HTTP
+  200 with an empty page and `next_cursor: null`. Parsing lives in a shared,
+  dependency-free helper (`docs_drift_detector/pagination.py`), and the
+  endpoints stay strictly read-only with the same malformed-scan skipping as
+  before.
 - **Per-workspace scan retention.** A workspace can cap how many stored scans it
   keeps (`GET`/`PUT`/`DELETE /api/workspaces/{ws}/retention`, with
   `max_scans` in `0..10000`; `0` clears the policy and an unset workspace
@@ -272,10 +293,12 @@ release-to-docs comparison with text and screenshot matching.
   **time-bucketed trend** (`GET /api/workspaces/{ws}/trend/buckets`,
   `GET /api/trend/buckets`) now closes the time-based-bucketing gap so periods
   can be compared week over week. An explicit inclusive **`from`/`to` window**
-  now ships on all four trend endpoints, so the remaining trend gap is
-  pagination of older buckets and scans rather than date-range filtering;
-  broader connector coverage and making repositories first-class per-workspace
-  objects remain as well.
+  and a stable **`cursor`/`next_cursor` pagination** now ship on all four trend
+  endpoints, so a release window can be filtered *and* paged further back. The
+  remaining trend gaps are time-zone-aware bucketing (buckets are always UTC),
+  a `month` (or larger) bucket and per-severity filtering rather than pagination
+  or date-range filtering; broader connector coverage and making repositories
+  first-class per-workspace objects remain as well.
 - Screenshot diffing with per-region highlighting instead of change signals.
 - Pluggable connectors for GitHub commit ranges and rendered docs sites.
 - Per-workspace repositories and doc-page quotas for the tiered SaaS plan.
@@ -312,33 +335,35 @@ release-to-docs comparison with text and screenshot matching.
   workspace only: there is no pagination, no time-based expiry and no cross-
   workspace or global view, and the oldest entry is dropped once
   `MAX_DIGEST_HISTORY = 20` is reached.
-- The drift trend is bounded (`limit` clamped to `1..50`, default `10`) and
-  keyed by workspace only: it reads the single JSON store, presents scans in
-  scan order rather than time buckets, has no pagination, and offers no
-  cross-workspace or global trend. It does accept the shared inclusive
-  `from`/`to` `created_at` window (see *Date-range filtering* above). The
-  time-bucketed variant (`GET /api/workspaces/{ws}/trend/buckets`) closes the
-  scan-order gap but is itself bounded (`limit` buckets clamped to `1..50`,
-  default `10`, `bucket` is `day` or `week` only) and workspace-keyed: it has no
-  `month` (or larger) bucket, no pagination beyond `limit`, and no time-zone
-  parameter (buckets are always UTC), though it shares the same `from`/`to`
-  date-range filter.
-- The cross-workspace drift roll-up (`GET /api/trend`) is bounded (`limit`
-  clamped to `1..50`, default `10`) and keyed by workspace: it reads the single
-  JSON store, presents one chronological window in scan order rather than time
-  buckets, has no pagination or per-severity filtering, and the `workspaces`
+- The drift trend is bounded per page (`limit` clamped to `1..50`, default `10`)
+  and keyed by workspace only: it reads the single JSON store, presents scans in
+  scan order rather than time buckets, and offers no cross-workspace or global
+  trend. It accepts the shared inclusive `from`/`to` `created_at` window and the
+  shared opaque `cursor` (see *Date-range filtering* and *Cursor-based
+  pagination* above), so older scans can be paged back rather than only the most
+  recent window. The time-bucketed variant
+  (`GET /api/workspaces/{ws}/trend/buckets`) closes the scan-order gap but is
+  itself bounded per page (`limit` buckets clamped to `1..50`, default `10`,
+  `bucket` is `day` or `week` only) and workspace-keyed: it has no `month` (or
+  larger) bucket and no time-zone parameter (buckets are always UTC), though it
+  shares the same `from`/`to` date-range filter and `cursor` pagination.
+- The cross-workspace drift roll-up (`GET /api/trend`) is bounded per page
+  (`limit` clamped to `1..50`, default `10`) and keyed by workspace: it reads
+  the single JSON store, presents one chronological window in scan order rather
+  than time buckets, has no per-severity filtering, and the `workspaces`
   aggregate grows with the number of distinct workspaces in the window (scans
   without a workspace appear under the empty-string bucket). It shares the
-  inclusive `from`/`to` date-range filter. Its time-bucketed companion
-  (`GET /api/trend/buckets`) shares those limits (`day`/`week` only, `limit`
-  buckets clamped to `1..50`, UTC only, same `from`/`to` filter, no pagination)
-  and likewise has no per-severity filtering.
+  inclusive `from`/`to` date-range filter and the opaque `cursor` pagination.
+  Its time-bucketed companion (`GET /api/trend/buckets`) shares those limits
+  (`day`/`week` only, `limit` buckets clamped to `1..50`, UTC only, same
+  `from`/`to` filter and `cursor` pagination) and likewise has no per-severity
+  filtering.
 - Both time-bucketed trend endpoints are strictly read-only: they read the single
   JSON store and never mutate it, dispatch a webhook, open a pull request or
-  record a digest. Their `bucket`/`limit` bounds and `from`/`to` window above are
-  the only inputs, and an unsupported `bucket` value, a non-integer `limit` or a
-  malformed `from`/`to` is rejected with HTTP 400 rather than silently
-  defaulted.
+  record a digest. Their `bucket`/`limit` bounds, `from`/`to` window and optional
+  `cursor` above are the only inputs, and an unsupported `bucket` value, a
+  non-integer `limit`, a malformed `from`/`to` or a malformed `cursor` is
+  rejected with HTTP 400 rather than silently defaulted.
 
 ## Revenue hypothesis
 

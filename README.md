@@ -50,10 +50,10 @@ Open <http://localhost:8080>. The service exposes:
 - `DELETE /api/workspaces/{ws}/retention` — clear the retention policy.
 - `GET  /api/schedule/status` — scheduler status (`enabled`, `tick_seconds`, `due`, `schedules`).
 - `GET  /api/workspaces/{ws}/digests` — recent scheduled-scan digests for a workspace, newest first (`limit` optional, default `10`).
-- `GET  /api/workspaces/{ws}/trend` — chronological drift trend across a workspace's recent scans (`limit` optional, default `10`, max `50`; `from`/`to` optional inclusive window).
-- `GET  /api/workspaces/{ws}/trend/buckets` — time-bucketed drift trend (`bucket` optional `day`|`week`, default `week`; `limit` optional, default `10`, max `50`; `from`/`to` optional inclusive window).
-- `GET  /api/trend` — cross-workspace drift roll-up across the recent scans of all workspaces (`limit` optional, default `10`, max `50`; `from`/`to` optional inclusive window).
-- `GET  /api/trend/buckets` — cross-workspace time-bucketed drift roll-up (`bucket` optional `day`|`week`, default `week`; `limit` optional, default `10`, max `50`; `from`/`to` optional inclusive window).
+- `GET  /api/workspaces/{ws}/trend` — chronological drift trend across a workspace's scans (`limit` optional, default `10`, max `50`; `from`/`to` optional inclusive window; `cursor` optional page cursor).
+- `GET  /api/workspaces/{ws}/trend/buckets` — time-bucketed drift trend (`bucket` optional `day`|`week`, default `week`; `limit` optional, default `10`, max `50`; `from`/`to` optional inclusive window; `cursor` optional page cursor).
+- `GET  /api/trend` — cross-workspace drift roll-up across the scans of all workspaces (`limit` optional, default `10`, max `50`; `from`/`to` optional inclusive window; `cursor` optional page cursor).
+- `GET  /api/trend/buckets` — cross-workspace time-bucketed drift roll-up (`bucket` optional `day`|`week`, default `week`; `limit` optional, default `10`, max `50`; `from`/`to` optional inclusive window; `cursor` optional page cursor).
 
 ### Scan request body
 
@@ -509,15 +509,17 @@ curl -sS 'localhost:8080/api/workspaces/ws1/trend?limit=5' | python3 -m json.too
     "high_open": 1,
     "suppressed": 0,
     "delta_high": 0
-  }
+  },
+  "next_cursor": null
 }
 ```
 
 - The window selects the workspace's stored scans **newest-first**, takes up to
   `limit`, then presents them **oldest-first** so `scans` reads as a
-  chronological series. Counting a finding as *open* means it is not resolved;
-  `by_severity` and openness match the stored scan semantics used by webhooks,
-  digests and PR suggestions.
+  chronological series. `next_cursor` is `null` here because this page reaches
+  the oldest scan; see [Pagination](#pagination-trend-endpoints). Counting a
+  finding as *open* means it is not resolved; `by_severity` and openness match
+  the stored scan semantics used by webhooks, digests and PR suggestions.
 - `summary.delta_high` is `newest.high_open - oldest.high_open` across the
   window (a positive value means the newest scan has more open high-severity
   findings than the oldest). It is `0` when fewer than two scans are in the
@@ -530,9 +532,11 @@ curl -sS 'localhost:8080/api/workspaces/ws1/trend?limit=5' | python3 -m json.too
 - An invalid workspace id (for example `bad id!`) returns HTTP 400. A
   well-formed but unknown workspace returns HTTP 200 with an empty `scans` list
   and a zeroed `summary`.
-- The trend is bounded and workspace-keyed only: there is no pagination, no
-  cross-workspace or global trend, and no time-based bucketing beyond scan
-  order. The scans live in the single JSON store.
+- The trend is bounded per page and workspace-keyed only: there is no
+  cross-workspace or global trend and no time-based bucketing beyond scan order,
+  but older pages can be fetched with the optional `cursor` (see
+  [Pagination](#pagination-trend-endpoints) below). The scans live in the single
+  JSON store.
 
 ### Cross-workspace drift roll-up
 
@@ -606,7 +610,8 @@ curl -sS 'localhost:8080/api/trend?limit=5' | python3 -m json.tool
     "high_open": 3,
     "suppressed": 0,
     "delta_high": 1
-  }
+  },
+  "next_cursor": null
 }
 ```
 
@@ -631,10 +636,10 @@ curl -sS 'localhost:8080/api/trend?limit=5' | python3 -m json.tool
   or `created_at`) are skipped without changing the HTTP status. On an empty
   store the response is HTTP 200 with empty `scans` and `workspaces` and a
   zeroed `summary`.
-- The roll-up is bounded and keyed by workspace only: one chronological window
-  in scan order rather than time buckets, with no pagination. The optional
-  `from`/`to` window described below applies here too. The scans live in the
-  single JSON store.
+- The roll-up is bounded per page and keyed by workspace only: one chronological
+  window in scan order rather than time buckets. The optional `from`/`to` window
+  and `cursor` described below apply here too. The scans live in the single JSON
+  store.
 
 ### Time-bucketed drift trend
 
@@ -679,7 +684,8 @@ curl -sS 'localhost:8080/api/workspaces/ws1/trend/buckets?bucket=week&limit=5' \
     "high_open": 2,
     "suppressed": 0,
     "delta_high": 0
-  }
+  },
+  "next_cursor": null
 }
 ```
 
@@ -784,7 +790,8 @@ curl -sS 'localhost:8080/api/trend/buckets?bucket=day' | python3 -m json.tool
     "suppressed": 0,
     "delta_high": 0,
     "workspaces": 2
-  }
+  },
+  "next_cursor": null
 }
 ```
 
@@ -796,10 +803,10 @@ curl -sS 'localhost:8080/api/trend/buckets?bucket=day' | python3 -m json.tool
   count. `bucket`/`limit` validation and malformed-scan skipping match the
   per-workspace route; on an empty store the response is HTTP 200 with empty
   `buckets`/`workspaces` and a zeroed `summary`.
-- Both routes are bounded (`bucket` is `day`/`week` only and `limit` buckets are
-  clamped to `1..50`, default `10`), UTC-only, and have no pagination beyond
-  `limit`. The optional inclusive `from`/`to` window described below applies to
-  both.
+- Both routes are bounded per page (`bucket` is `day`/`week` only and `limit`
+  buckets are clamped to `1..50`, default `10`) and UTC-only. The optional
+  inclusive `from`/`to` window and the `cursor` pagination described below apply
+  to both.
 
 ### Date-range filtering (trend endpoints)
 
@@ -833,6 +840,46 @@ curl -sS 'localhost:8080/api/trend/buckets?bucket=day&from=2026-01-05' \
 - A window that excludes every scan is not an error: the endpoint returns HTTP
   200 with empty `scans`/`buckets` and a zeroed `summary`, and `delta_high` is
   `0` whenever fewer than two scans (or buckets) remain.
+
+### Pagination (trend endpoints)
+
+All four read-only trend endpoints — `GET /api/workspaces/{ws}/trend`,
+`GET /api/workspaces/{ws}/trend/buckets`, `GET /api/trend` and
+`GET /api/trend/buckets` — return a `next_cursor` field and accept an optional
+`cursor` query parameter so a documentation lead can page further back to an
+older release window once the most recent `limit` scans or buckets are
+exhausted. Without a cursor the response is unchanged (the most recent `limit`
+items, `limit` clamped to `1..50`, default `10`) apart from the added
+`next_cursor`; `from`/`to` filtering and `bucket` selection are applied before
+pagination.
+
+Each page is presented **oldest-first**, and following the returned
+`next_cursor` walks **backwards** in time. Prepend each new page to reconstruct
+the full chronological series. `next_cursor` is `null` on the last page. The
+cursor is an opaque, URL-safe string derived from the item's sort key
+(`created_at` plus a tiebreaker for scans, the bucket `start` plus key for
+buckets) rather than an offset index, so a scan or bucket created between
+requests never shifts an older page.
+
+```sh
+# page 1: the most recent two scans for ws1 (oldest-first within the page)
+curl -sS 'localhost:8080/api/workspaces/ws1/trend?limit=2' | python3 -m json.tool
+
+# page 2: follow the returned next_cursor to the next older two scans
+# (URL-encode the cursor when scripting; this example uses a shell variable)
+CURSOR=$(curl -sS 'localhost:8080/api/workspaces/ws1/trend?limit=2' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["next_cursor"])')
+curl -sS "localhost:8080/api/workspaces/ws1/trend?limit=2&cursor=${CURSOR}" \
+  | python3 -m json.tool
+```
+
+- A malformed cursor (for example `cursor=%%%%`) returns HTTP 400 on all four
+  endpoints.
+- A well-formed but unknown or expired cursor returns HTTP 200 with an empty
+  `scans`/`buckets` list, a zeroed `summary` and `next_cursor: null`.
+- A blank cursor (`cursor=`) is treated as absent.
+- Pagination composes with the inclusive `from`/`to` window and `bucket`
+  selection: only in-window scans/buckets are paged.
 
 ### Pull-request suggestion
 
