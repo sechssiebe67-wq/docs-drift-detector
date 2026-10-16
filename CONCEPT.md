@@ -161,6 +161,21 @@ manual review marathon.
   erroring webhook still records the digest attempt with `delivery_ok: false`
   (and a non-empty `delivery_error`) and never changes the stored scan or stops
   the scheduler.
+- **Per-workspace drift trend.** A workspace's recent stored scans can be
+  summarised into a chronological time series through
+  `GET /api/workspaces/{ws}/trend` (optional integer `limit`, default `10`,
+  clamped to `1..50`). The response is `{"workspace", "scans", "summary"}` where
+  `scans` holds up to `limit` scans ordered oldest-first, each carrying
+  `scan_id`, `created_at`, `name`, `total_findings`, `by_severity`
+  (`high`/`medium`/`low`), `open_findings`, `high_open` and `suppressed`, and
+  `summary` aggregates the window (`scans`, `total_findings`, `by_severity`,
+  `open_findings`, `high_open`, `suppressed`) plus `delta_high`
+  (`newest.high_open - oldest.high_open`, `0` when fewer than two scans are in
+  the window). The window is bounded and workspace-keyed, the endpoint is
+  strictly read-only (never mutates the store, dispatches a webhook, opens a
+  pull request or records a digest), and malformed stored scans are skipped
+  rather than raising. This lets a team answer "are we getting better or worse
+  at keeping docs in sync?" without exporting scans one by one.
 - **Per-workspace scan retention.** A workspace can cap how many stored scans it
   keeps (`GET`/`PUT`/`DELETE /api/workspaces/{ws}/retention`, with
   `max_scans` in `0..10000`; `0` clears the policy and an unset workspace
@@ -191,8 +206,11 @@ release-to-docs comparison with text and screenshot matching.
   checklist with the same high-severity scope. The **per-workspace scan
   retention** policy now caps unbounded store growth by pruning the oldest scans
   after each stored scan, and the **per-workspace digest history** now makes
-  scheduled digests auditable after the fact. What remains is broader connector
-  coverage and making repositories first-class per-workspace objects.
+  scheduled digests auditable after the fact. A basic per-workspace **drift
+  trend** view now ships (`GET /api/workspaces/{ws}/trend`), so the remaining
+  trend gap is a cross-workspace/global roll-up and time-based bucketing rather
+  than scan order. What remains is broader connector coverage and making
+  repositories first-class per-workspace objects.
 - Screenshot diffing with per-region highlighting instead of change signals.
 - Pluggable connectors for GitHub commit ranges and rendered docs sites.
 - Per-workspace repositories and doc-page quotas for the tiered SaaS plan.
@@ -229,6 +247,10 @@ release-to-docs comparison with text and screenshot matching.
   workspace only: there is no pagination, no time-based expiry and no cross-
   workspace or global view, and the oldest entry is dropped once
   `MAX_DIGEST_HISTORY = 20` is reached.
+- The drift trend is bounded (`limit` clamped to `1..50`, default `10`) and
+  keyed by workspace only: it reads the single JSON store, presents scans in
+  scan order rather than time buckets, has no pagination, and offers no
+  cross-workspace or global trend.
 
 ## Revenue hypothesis
 
