@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from docs_drift_detector import github, notify  # noqa: E402
 from docs_drift_detector.server import create_server  # noqa: E402
 from docs_drift_detector.store import MAX_DIGEST_HISTORY, Store  # noqa: E402
+from docs_drift_detector.trend import MAX_LIMIT  # noqa: E402
 
 
 class ServerTest(unittest.TestCase):
@@ -895,6 +896,122 @@ class ServerTest(unittest.TestCase):
         )
         self.assertEqual(status, 400)
         self.assertIn("error", payload)
+
+    @staticmethod
+    def _trend_finding(fid="f1", severity="high", resolved=False):
+        return {
+            "id": fid,
+            "kind": "label",
+            "page": "help/a.md",
+            "title": "t",
+            "old_value": "Save",
+            "new_value": "Save changes",
+            "resolved": resolved,
+            "score": 40.0,
+            "severity": severity,
+        }
+
+    def _trend_scan(self, ws, findings, name="trend scan"):
+        return self.server.store.create_scan(name, "release", findings, workspace=ws)
+
+    def test_workspace_trend_unknown_returns_empty(self):
+        status, payload = self._json("GET", "/api/workspaces/wsNeverTrends/trend")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["workspace"], "wsNeverTrends")
+        self.assertEqual(payload["scans"], [])
+        self.assertEqual(
+            payload["summary"],
+            {
+                "scans": 0,
+                "total_findings": 0,
+                "by_severity": {"high": 0, "medium": 0, "low": 0},
+                "open_findings": 0,
+                "high_open": 0,
+                "suppressed": 0,
+                "delta_high": 0,
+            },
+        )
+
+    def test_workspace_trend_invalid_id_returns_400(self):
+        status, payload = self._json("GET", "/api/workspaces/bad%20id!/trend")
+        self.assertEqual(status, 400)
+        self.assertIn("error", payload)
+
+    def test_workspace_trend_shape_and_order(self):
+        ws = "wsTrendShape"
+        self._trend_scan(ws, [self._trend_finding("a")], name="first")
+        self._trend_scan(
+            ws,
+            [self._trend_finding("b"), self._trend_finding("c")],
+            name="second",
+        )
+        self._trend_scan(ws, [self._trend_finding("d")], name="third")
+        status, payload = self._json("GET", "/api/workspaces/%s/trend" % ws)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["workspace"], ws)
+        self.assertEqual(
+            [entry["name"] for entry in payload["scans"]],
+            ["first", "second", "third"],
+        )
+        self.assertEqual(
+            [entry["high_open"] for entry in payload["scans"]], [1, 2, 1]
+        )
+        for entry in payload["scans"]:
+            self.assertEqual(
+                set(entry),
+                {
+                    "scan_id",
+                    "created_at",
+                    "name",
+                    "total_findings",
+                    "by_severity",
+                    "open_findings",
+                    "high_open",
+                    "suppressed",
+                },
+            )
+            self.assertEqual(set(entry["by_severity"]), {"high", "medium", "low"})
+        self.assertEqual(
+            set(payload["summary"]),
+            {
+                "scans",
+                "total_findings",
+                "by_severity",
+                "open_findings",
+                "high_open",
+                "suppressed",
+                "delta_high",
+            },
+        )
+        self.assertEqual(payload["summary"]["scans"], 3)
+        self.assertEqual(payload["summary"]["delta_high"], 0)
+
+    def test_workspace_trend_non_integer_limit_returns_400(self):
+        status, payload = self._json(
+            "GET", "/api/workspaces/wsTrendBad/trend?limit=abc"
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("error", payload)
+
+    def test_workspace_trend_limit_is_clamped(self):
+        ws = "wsTrendClamp"
+        for index in range(3):
+            self._trend_scan(ws, [self._trend_finding("f%d" % index)], name="s%d" % index)
+        status, payload = self._json("GET", "/api/workspaces/%s/trend?limit=0" % ws)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload["scans"]), 1)
+        status, payload = self._json("GET", "/api/workspaces/%s/trend?limit=999" % ws)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload["scans"]), 3)
+
+    def test_workspace_trend_limit_clamped_to_max(self):
+        ws = "wsTrendMax"
+        for index in range(MAX_LIMIT + 5):
+            self._trend_scan(ws, [], name="s%02d" % index)
+        status, payload = self._json("GET", "/api/workspaces/%s/trend?limit=999" % ws)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload["scans"]), MAX_LIMIT)
+        self.assertEqual(payload["summary"]["scans"], MAX_LIMIT)
 
     def _high_severity_scan(self, name="PR scan"):
         body = {

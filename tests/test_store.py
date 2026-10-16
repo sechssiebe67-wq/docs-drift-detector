@@ -591,6 +591,18 @@ class StoreTest(unittest.TestCase):
         latest = self.store.latest_workspace_scan("ws1")
         self.assertEqual(latest["id"], second["id"])
 
+    def test_list_workspace_scans_newest_first_and_filtered(self):
+        self.assertEqual(self.store.list_workspace_scans("ws1"), [])
+        first = self.store.create_scan("one", "release", [_finding()], workspace="ws1")
+        second = self.store.create_scan("two", "release", [_finding()], workspace="ws1")
+        self.store.create_scan("other", "release", [_finding()], workspace="ws2")
+        scans = self.store.list_workspace_scans("ws1")
+        self.assertEqual([scan["id"] for scan in scans], [second["id"], first["id"]])
+
+    def test_list_workspace_scans_rejects_invalid_name(self):
+        with self.assertRaises(ValueError):
+            self.store.list_workspace_scans("bad id!")
+
     def test_old_store_without_schedules_key_loads(self):
         with open(self.path, "w", encoding="utf-8") as handle:
             handle.write('{"scans": {}}')

@@ -50,6 +50,7 @@ Open <http://localhost:8080>. The service exposes:
 - `DELETE /api/workspaces/{ws}/retention` — clear the retention policy.
 - `GET  /api/schedule/status` — scheduler status (`enabled`, `tick_seconds`, `due`, `schedules`).
 - `GET  /api/workspaces/{ws}/digests` — recent scheduled-scan digests for a workspace, newest first (`limit` optional, default `10`).
+- `GET  /api/workspaces/{ws}/trend` — chronological drift trend across a workspace's recent scans (`limit` optional, default `10`, max `50`).
 
 ### Scan request body
 
@@ -467,6 +468,65 @@ changes the `POST /api/scans` response, which still returns HTTP 201 with the
 unchanged scan document. The policy is stored alongside the scans under
 `workspace_retention`, and reloading a store with a missing or malformed key
 treats every workspace as unset.
+
+### Workspace drift trend
+
+To answer "are we getting better or worse at keeping docs in sync?", a
+workspace's recent stored scans can be summarised into a small chronological
+time series. The endpoint is read-only: it reuses the stored scans, never
+mutates the store, and never dispatches a webhook, opens a pull request or
+records a digest.
+
+```sh
+curl -sS 'localhost:8080/api/workspaces/ws1/trend?limit=5' | python3 -m json.tool
+```
+
+`GET /api/workspaces/{ws}/trend` returns HTTP 200 with:
+
+```json
+{
+  "workspace": "ws1",
+  "scans": [
+    {
+      "scan_id": "a1b2c3d4e5f6",
+      "created_at": "2026-01-01T12:00:00+00:00",
+      "name": "Release 4.2",
+      "total_findings": 3,
+      "by_severity": {"high": 1, "medium": 1, "low": 1},
+      "open_findings": 2,
+      "high_open": 1,
+      "suppressed": 0
+    }
+  ],
+  "summary": {
+    "scans": 1,
+    "total_findings": 3,
+    "by_severity": {"high": 1, "medium": 1, "low": 1},
+    "open_findings": 2,
+    "high_open": 1,
+    "suppressed": 0,
+    "delta_high": 0
+  }
+}
+```
+
+- The window selects the workspace's stored scans **newest-first**, takes up to
+  `limit`, then presents them **oldest-first** so `scans` reads as a
+  chronological series. Counting a finding as *open* means it is not resolved;
+  `by_severity` and openness match the stored scan semantics used by webhooks,
+  digests and PR suggestions.
+- `summary.delta_high` is `newest.high_open - oldest.high_open` across the
+  window (a positive value means the newest scan has more open high-severity
+  findings than the oldest). It is `0` when fewer than two scans are in the
+  window. The other summary fields aggregate the window.
+- The optional `limit` query parameter is an integer (default `10`) clamped into
+  `1..50`; a non-integer such as `limit=abc` returns HTTP 400.
+- An invalid workspace id (for example `bad id!`) returns HTTP 400. A
+  well-formed but unknown workspace returns HTTP 200 with an empty `scans` list
+  and a zeroed `summary`.
+- The trend is bounded and workspace-keyed only: there is no pagination, no
+  cross-workspace or global trend, and no time-based bucketing beyond scan
+  order. The scans live in the single JSON store.
 
 ### Pull-request suggestion
 

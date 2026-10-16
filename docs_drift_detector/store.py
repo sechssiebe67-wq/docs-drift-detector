@@ -716,6 +716,23 @@ class Store:
                     latest = scan
             return copy.deepcopy(latest) if latest is not None else None
 
+    def list_workspace_scans(self, workspace: str) -> List[Dict[str, Any]]:
+        """Return the workspace's stored scans, newest-first.
+
+        Only scans that carry a matching ``workspace`` are returned. Ordering
+        uses ``(created_at, insertion index)`` descending so scans created in
+        the same second keep a deterministic newest-first order.
+        """
+        name = self._check_workspace(workspace)
+        with self._lock:
+            relevant = [
+                (str(scan.get("created_at", "")), index, scan)
+                for index, scan in enumerate(self._scans.values())
+                if isinstance(scan, dict) and scan.get("workspace") == name
+            ]
+        relevant.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return [copy.deepcopy(scan) for _, _, scan in relevant]
+
     def create_scan(
         self,
         name: str,

@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import analyze, export, github, pullrequest, runner
+from . import analyze, export, github, pullrequest, runner, trend
 from .store import (
     DEFAULT_GITHUB_TOKEN_ENV,
     MAX_DIGEST_HISTORY,
@@ -184,6 +184,19 @@ class Handler(BaseHTTPRequestHandler):
                 limit = MAX_DIGEST_HISTORY
             digests = self.server.store.list_workspace_digests(parts[2], limit)
             return self._json(200, {"workspace": parts[2], "digests": digests})
+        if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "trend":
+            if not _valid_id(parts[2]):
+                return self._error(400, "invalid workspace id")
+            query = urllib.parse.parse_qs(
+                urllib.parse.urlparse(self.path).query, keep_blank_values=True
+            )
+            limit = trend.DEFAULT_LIMIT
+            if "limit" in query:
+                try:
+                    limit = int(query["limit"][0])
+                except (TypeError, ValueError):
+                    return self._error(400, "invalid limit")
+            return self._json(200, trend.build_trend(self.server.store, parts[2], limit))
         if parts == ["api", "schedule", "status"]:
             return self._schedule_status()
         if (
