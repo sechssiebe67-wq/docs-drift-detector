@@ -1,0 +1,18 @@
+{
+  "scan_id": "a1b2c3d4e5f6",
+  "name": "Release 4.2 preview",
+  "workspace": "ws1",
+  "created_at": "2026-01-01T12:00:00+00:00",
+  "branch": "docs-drift/a1b2c3d4e5f6",
+  "base_branch": "main",
+  "title": "docs: address drift from Release 4.2 preview",
+  "body": "## Docs drift update: Release 4.2 preview\n\n1 high-severity documentation finding(s) from scan `a1b2c3d4e5f6` require an update.\n\n- `help/getting-started.md` — /settings → /account/settings (route)",
+  "files": [
+    {
+      "path": "help/getting-started.md",
+      "action": "update",
+      "reason": "Route \"/settings\" changed in the release"
+    }
+  ],
+  "checklist": "# Docs drift report: Release 4.2 preview\n\n- **Scan:** `a1b2c3d4e5f6`\n- **Source:** release-4.2\n- **Created:** 2026-01-01T12:00:00+00:00\n- **Findings:** 4 (4 open, 1 high)\n\n- [ ] **[HIGH] Route \"/settings\" changed in the release** (`route`, page `help/getting-started.md`)\n  - Documentation still references the old value; update it to \"/account/settings\".\n  - Context: `Click Save to store your work. Open Projects from the sidebar and visit /settings to configure your profile.`\n- [ ] **[MEDIUM] UI label \"Projects\" changed in the release** (`label`, page `help/getting-started.md`)\n  - Documentation still references the old value; update it to \"Workspaces\".\n  - Context: `Click Save to store your work. Open Projects from the sidebar and visit /settings to configure your profile.`\n- [ ] **[MEDIUM] UI label \"Projects\" changed in the release** (`label`, page `help/dashboard.md`)\n  - Documentation still references the old value; update it to \"Workspaces\".\n  - Context: `The dashboard lists every Projects entry. You can delete your account from here.`\n- [ ] **[LOW] Screenshot \"img/dashboard.png\" changed in the release** (`screenshot`, page `help/dashboard.md`)\n  - Screenshot img/dashboard.png changed in the release. KPI tiles were rearranged.\n  - Context: `![Dashboard](img/dashboard.png)`\n"
+}
