@@ -11,10 +11,10 @@ checkable list of the documentation sections that most likely need an update.
 It is intentionally a *release-to-docs* tool. It is not a feedback inbox and it
 does not require customer tickets to work; it derives documentation work directly
 from what shipped. The goal has not changed: the drift trend views (per-workspace,
-cross-workspace, time-bucketed and their CSV/JSONL exports) are a **read-only
-reporting layer on top of** the release-to-docs core — they summarise
-already-stored scans for reporting and never alter findings, the store or the
-release-to-docs flow.
+cross-workspace, time-bucketed and their CSV/JSONL exports) and the
+**per-workspace drift dashboard** are a **read-only reporting layer on top of**
+the release-to-docs core — they summarise already-stored scans for reporting and
+never alter findings, the store or the release-to-docs flow.
 
 ## Intended users
 
@@ -332,6 +332,27 @@ manual review marathon.
   alongside the CSV export in the standard-library-only
   `docs_drift_detector/csv_export.py` (`to_jsonl(document, kind)`, which raises
   `ValueError` for an unknown `kind`).
+- **Per-workspace drift dashboard.** A documentation lead who wants to answer
+  "what does drift look like for this workspace right now?" can fetch one
+  composed, read-only document instead of stitching several responses together
+  through `GET /api/workspaces/{ws}/dashboard` (optional `limit` default `10`
+  clamped `1..50`, `bucket` `day`|`week` default `week`, and the shared
+  `from`/`to` window; an unsupported `bucket`, non-integer `limit` or malformed
+  `from`/`to` is rejected with HTTP 400, an invalid workspace id returns HTTP
+  400 and a well-formed but unknown workspace returns HTTP 200 with empty
+  `trend`/`buckets` and a zeroed `summary`). The response carries `workspace`,
+  `generated_at` (UTC ISO-8601), a `window` echo (`from`, `to`, `limit`,
+  `bucket`), the exact `trend` document from `trend.build_trend`, the exact
+  `buckets` list from `buckets.build_workspace_buckets`, the workspace's recent
+  digest history (`store.list_workspace_digests`, newest-first, bounded by the
+  same `limit`) and a merged `summary` carrying `total_findings`, `by_severity`,
+  `open_findings`, `high_open`, `suppressed`, `delta_high`, `scans`, `buckets`
+  and `latest_digest` (the newest digest entry or `null`). It reuses the existing
+  builders rather than recomputing anything, skips malformed scans exactly like
+  `rollup.build_rollup` / `buckets._valid_entries`, and is strictly read-only
+  (never mutates the store, dispatches a webhook, opens a pull request or
+  records a digest), living in the standard-library-only
+  `docs_drift_detector/dashboard.py`.
 - **Per-workspace scan retention.** A workspace can cap how many stored scans it
   keeps (`GET`/`PUT`/`DELETE /api/workspaces/{ws}/retention`, with
   `max_scans` in `0..10000`; `0` clears the policy and an unset workspace
@@ -381,7 +402,12 @@ release-to-docs comparison with text and screenshot matching.
   (or larger) bucket, per-severity filtering and a JSON/CSV/JSONL export of the
   *scan-order* trend (only the two bucketed endpoints export today); broader
   connector coverage and making repositories first-class per-workspace objects
-  remain as well.
+  remain as well. The **per-workspace drift dashboard**
+  (`GET /api/workspaces/{ws}/dashboard`) now composes the trend, buckets and
+  digest history into one read-only document; the next direction for it is a
+  **cross-workspace dashboard companion** (a portfolio-wide "right now" view)
+  and embedding the dashboard in the web UI so the current state renders without
+  a JSON client.
 - Screenshot diffing with per-region highlighting instead of change signals.
 - Pluggable connectors for GitHub commit ranges and rendered docs sites.
 - Per-workspace repositories and doc-page quotas for the tiered SaaS plan.

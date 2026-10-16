@@ -58,6 +58,7 @@ Open <http://localhost:8080>. The service exposes:
 - `GET  /api/trend/buckets.csv` — cross-workspace time-bucketed drift roll-up as a CSV attachment (same query parameters as `/trend/buckets`).
 - `GET  /api/workspaces/{ws}/trend/buckets.jsonl` — time-bucketed drift trend as a newline-delimited JSON attachment (same query parameters as `/trend/buckets`).
 - `GET  /api/trend/buckets.jsonl` — cross-workspace time-bucketed drift roll-up as a newline-delimited JSON attachment (same query parameters as `/trend/buckets`).
+- `GET  /api/workspaces/{ws}/dashboard` — composed read-only drift dashboard for one workspace (`limit` optional, default `10`, max `50`; `bucket` optional `day`|`week`, default `week`; `from`/`to` optional inclusive window).
 
 ### Scan request body
 
@@ -1012,6 +1013,125 @@ curl -sS 'localhost:8080/api/trend/buckets.jsonl?bucket=day' > trend.jsonl
   (`to_jsonl(document, kind)`, which raises `ValueError` for an unknown `kind`)
   and reuses the `buckets.build_workspace_buckets` /
   `buckets.build_rollup_buckets` output rather than recomputing anything.
+
+### Workspace drift dashboard
+
+Answering "what does drift look like for this workspace right now?" otherwise
+means calling several endpoints (`/trend`, `/trend/buckets` and `/digests`) and
+stitching the responses together. `GET /api/workspaces/{ws}/dashboard` composes
+those existing builders into a single read-only JSON document so a UI or a
+`curl | jq` pipeline can render the current state in one request. It reuses
+`trend.build_trend`, `buckets.build_workspace_buckets` and the digest-history
+reader rather than recomputing anything, and never mutates the store, dispatches
+a webhook, opens a pull request or records a digest.
+
+```sh
+curl -sS 'localhost:8080/api/workspaces/ws1/dashboard?limit=5&bucket=week' \
+  | python3 -m json.tool
+```
+
+`GET /api/workspaces/{ws}/dashboard` returns HTTP 200 with:
+
+```json
+{
+  "workspace": "ws1",
+  "generated_at": "2026-01-02T12:00:00+00:00",
+  "window": {"from": null, "to": null, "limit": 5, "bucket": "week"},
+  "trend": {
+    "workspace": "ws1",
+    "scans": [
+      {
+        "scan_id": "a1b2c3d4e5f6",
+        "created_at": "2026-01-01T12:00:00+00:00",
+        "name": "Release 4.2",
+        "total_findings": 3,
+        "by_severity": {"high": 1, "medium": 1, "low": 1},
+        "open_findings": 2,
+        "high_open": 1,
+        "suppressed": 0
+      }
+    ],
+    "summary": {
+      "scans": 1,
+      "total_findings": 3,
+      "by_severity": {"high": 1, "medium": 1, "low": 1},
+      "open_findings": 2,
+      "high_open": 1,
+      "suppressed": 0,
+      "delta_high": 0
+    },
+    "next_cursor": null
+  },
+  "buckets": [
+    {
+      "key": "2026-W02",
+      "start": "2026-01-05T00:00:00+00:00",
+      "end": "2026-01-11T23:59:59+00:00",
+      "scans": 1,
+      "total_findings": 3,
+      "by_severity": {"high": 1, "medium": 1, "low": 1},
+      "open_findings": 2,
+      "high_open": 1,
+      "suppressed": 0
+    }
+  ],
+  "digests": [
+    {
+      "created_at": "2026-01-01T12:00:00+00:00",
+      "scan_id": "a1b2c3d4e5f6",
+      "total_findings": 3,
+      "by_severity": {"high": 1, "medium": 1, "low": 1},
+      "new_high_count": 1,
+      "delivery_ok": true,
+      "delivery_error": "",
+      "attempts": 1
+    }
+  ],
+  "summary": {
+    "scans": 1,
+    "buckets": 1,
+    "total_findings": 3,
+    "by_severity": {"high": 1, "medium": 1, "low": 1},
+    "open_findings": 2,
+    "high_open": 1,
+    "suppressed": 0,
+    "delta_high": 0,
+    "latest_digest": {
+      "created_at": "2026-01-01T12:00:00+00:00",
+      "scan_id": "a1b2c3d4e5f6",
+      "total_findings": 3,
+      "by_severity": {"high": 1, "medium": 1, "low": 1},
+      "new_high_count": 1,
+      "delivery_ok": true,
+      "delivery_error": "",
+      "attempts": 1
+    }
+  }
+}
+```
+
+- `trend` and `buckets` are byte-for-byte the documents returned by
+  `GET /api/workspaces/{ws}/trend` and `GET /api/workspaces/{ws}/trend/buckets`
+  for the same effective query parameters, because the dashboard reuses those
+  builders instead of recomputing anything.
+- `window` echoes the effective query parameters (`from`/`to` are `null` when
+  unset). `limit` is clamped into `1..50` (default `10`) and `bucket` accepts
+  only `day`/`week`, defaulting to `week`.
+- `digests` is the workspace's digest history (the same reader as
+  `GET /api/workspaces/{ws}/digests`), newest-first and bounded by `limit`;
+  `summary.latest_digest` is the newest entry or `null` when the workspace has
+  no digest history.
+- `summary` merges the bucket aggregate (`scans`, `buckets`, `total_findings`,
+  `by_severity`, `open_findings`, `high_open`, `suppressed`, `delta_high`) with
+  `latest_digest`.
+- `from`/`to` filter stored scans before aggregation; a blank bound is treated as
+  absent. An unsupported `bucket` (for example `bucket=month`), a non-integer
+  `limit` or a malformed `from`/`to` (`from=not-a-date`) returns HTTP 400. An
+  invalid workspace id returns HTTP 400; a well-formed but unknown workspace
+  returns HTTP 200 with empty `trend`/`buckets`, an empty `digests` list and a
+  zeroed `summary`.
+- The dashboard is strictly read-only: it never mutates the store, dispatches a
+  webhook, opens a pull request or records a digest.
 
 ### Pull-request suggestion
 
