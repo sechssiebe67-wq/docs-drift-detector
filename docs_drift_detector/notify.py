@@ -74,6 +74,61 @@ def build_payload(scan: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _finding_key(finding: Dict[str, Any]) -> tuple:
+    """Identity used to diff two scans: kind, page and the change values."""
+    return (
+        finding.get("kind", ""),
+        finding.get("page", ""),
+        finding.get("old_value", ""),
+        finding.get("new_value", ""),
+    )
+
+
+def build_digest(
+    scan: Dict[str, Any], previous_scan: Any = None
+) -> Dict[str, Any]:
+    """Build a JSON-serialisable digest payload for a scheduled scan.
+
+    The digest summarises every finding in ``scan`` (``total_findings`` and
+    ``by_severity``) and lists the high-severity findings that are new relative
+    to ``previous_scan`` as ``new_high``. A finding is considered new when its
+    ``(kind, page, old_value, new_value)`` key is absent from the previous
+    scan's findings. The high-severity selection and ordering reuse
+    :func:`build_payload` so webhook and digest scope stay identical.
+    """
+    scan = scan if isinstance(scan, dict) else {}
+    scan_id = scan.get("id") or ""
+    findings = [f for f in (scan.get("findings") or []) if isinstance(f, dict)]
+
+    by_severity = {"high": 0, "medium": 0, "low": 0}
+    for finding in findings:
+        severity = finding.get("severity")
+        if severity in by_severity:
+            by_severity[severity] += 1
+
+    previous_keys = set()
+    if isinstance(previous_scan, dict):
+        for finding in previous_scan.get("findings") or []:
+            if isinstance(finding, dict):
+                previous_keys.add(_finding_key(finding))
+
+    new_high = [
+        finding
+        for finding in build_payload(scan)["findings"]
+        if _finding_key(finding) not in previous_keys
+    ]
+
+    return {
+        "scan_id": scan_id,
+        "workspace": scan.get("workspace", ""),
+        "created_at": scan.get("created_at", ""),
+        "total_findings": len(findings),
+        "by_severity": by_severity,
+        "new_high": new_high,
+        "url": scan.get("url") or ("/api/scans/%s" % scan_id),
+    }
+
+
 def _opener(request: urllib.request.Request, timeout: float):
     """Indirection around :func:`urllib.request.urlopen` for easy testing."""
     return urllib.request.urlopen(request, timeout=timeout)

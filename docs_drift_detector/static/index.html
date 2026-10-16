@@ -101,6 +101,30 @@
     <div id="ws-history-list"></div>
   </section>
 
+  <section id="scheduled-scans">
+    <h2>Scheduled scans</h2>
+    <p class="muted">Register a recurring drift check per workspace. The background scheduler runs it every <code>interval_hours</code> and POSTs a digest of new high-severity findings to the workspace webhook. Intervals are whole hours (1–168); there is no cron expression support.</p>
+    <label for="sched-ws">Workspace</label>
+    <input id="sched-ws" placeholder="ws1">
+    <label for="sched-interval">Interval (hours, 1–168)</label>
+    <input id="sched-interval" type="number" min="1" max="168" step="1" value="24">
+    <div class="row">
+      <input id="sched-enabled" type="checkbox" checked>
+      <label for="sched-enabled" style="margin:0">Enabled</label>
+    </div>
+    <label for="sched-scan">Stored scan payload JSON (same shape as a saved scan)</label>
+    <textarea id="sched-scan" placeholder='{"name":"Nightly drift","changelog":"renamed \"Save\" to \"Save changes\"","pages":[{"path":"help/a.md","content":"Click Save."}]}'></textarea>
+    <div class="row">
+      <button id="sched-load">Load schedule</button>
+      <button id="sched-save" class="primary">Save schedule</button>
+      <button id="sched-clear">Clear schedule</button>
+      <button id="sched-status">Load scheduler status</button>
+      <span id="sched-state" class="muted" role="status" aria-live="polite"></span>
+    </div>
+    <p id="sched-next" class="muted"></p>
+    <div id="sched-due"></div>
+  </section>
+
   <section>
     <h2>Findings <span id="scan-title" class="muted"></span></h2>
     <div class="row">
@@ -562,6 +586,90 @@ async function promoteWorkspaceRevision(revision) {
   } catch (e) { $("ws-status").textContent = e.message; }
 }
 
+async function loadSchedule() {
+  const ws = $("sched-ws").value.trim();
+  if (!ws) { $("sched-state").textContent = "Enter a workspace name."; return; }
+  try {
+    const data = await api("GET", "/api/workspaces/" + encodeURIComponent(ws) + "/schedule");
+    const interval = data.interval_hours || 0;
+    $("sched-interval").value = interval > 0 ? interval : 24;
+    $("sched-enabled").checked = !!data.enabled;
+    $("sched-scan").value = data.scan && Object.keys(data.scan).length
+      ? JSON.stringify(data.scan, null, 2) : "";
+    $("sched-next").textContent = data.next_run_at
+      ? "Next run at " + data.next_run_at : "No schedule stored for " + ws + ".";
+    $("sched-state").textContent = interval > 0
+      ? "Loaded schedule for " + ws + " (" + (data.enabled ? "enabled" : "disabled") + ")."
+      : "No schedule stored for " + ws + ".";
+  } catch (e) { $("sched-state").textContent = e.message; }
+}
+
+async function saveSchedule() {
+  const ws = $("sched-ws").value.trim();
+  if (!ws) { $("sched-state").textContent = "Enter a workspace name."; return; }
+  let scan;
+  try { scan = parseJson($("sched-scan").value, {}, "schedule scan"); }
+  catch (e) { $("sched-state").textContent = e.message; return; }
+  const interval = parseInt($("sched-interval").value, 10);
+  if (!Number.isInteger(interval) || interval < 1 || interval > 168) {
+    $("sched-state").textContent = "Interval must be a whole number of hours between 1 and 168.";
+    return;
+  }
+  try {
+    const data = await api(
+      "PUT",
+      "/api/workspaces/" + encodeURIComponent(ws) + "/schedule",
+      { interval_hours: interval, enabled: $("sched-enabled").checked, scan }
+    );
+    $("sched-next").textContent = data.next_run_at
+      ? "Next run at " + data.next_run_at : "";
+    $("sched-state").textContent = "Saved schedule for " + ws + ".";
+  } catch (e) { $("sched-state").textContent = e.message; }
+}
+
+async function clearSchedule() {
+  const ws = $("sched-ws").value.trim();
+  if (!ws) { $("sched-state").textContent = "Enter a workspace name."; return; }
+  try {
+    await api("DELETE", "/api/workspaces/" + encodeURIComponent(ws) + "/schedule");
+    $("sched-scan").value = "";
+    $("sched-interval").value = 24;
+    $("sched-enabled").checked = false;
+    $("sched-next").textContent = "No schedule stored for " + ws + ".";
+    $("sched-state").textContent = "Cleared schedule for " + ws + ".";
+  } catch (e) { $("sched-state").textContent = e.message; }
+}
+
+async function loadScheduleStatus() {
+  const box = $("sched-due");
+  box.textContent = "";
+  try {
+    const data = await api("GET", "/api/schedule/status");
+    const summary = document.createElement("p");
+    summary.className = "muted";
+    summary.textContent = "Scheduler " + (data.enabled ? "enabled" : "disabled") +
+      " · tick " + data.tick_seconds + "s · " + (data.schedules || []).length +
+      " schedule(s) · " + (data.due || []).length + " due.";
+    box.appendChild(summary);
+    const due = data.due || [];
+    if (!due.length) {
+      const p = document.createElement("p");
+      p.className = "muted";
+      p.textContent = "No workspace is due right now.";
+      box.appendChild(p);
+      return;
+    }
+    const list = document.createElement("ul");
+    for (const item of due) {
+      const li = document.createElement("li");
+      li.textContent = item.workspace + " · every " + item.interval_hours +
+        "h · next " + (item.next_run_at || "—");
+      list.appendChild(li);
+    }
+    box.appendChild(list);
+  } catch (e) { $("sched-state").textContent = e.message; }
+}
+
 function syncWorkspaceNote() {
   $("workspace-note").hidden = !$("workspace").value.trim();
 }
@@ -582,6 +690,10 @@ $("ws-import-file").addEventListener("change", () => {
   if (file) { importWorkspaceRules(file); }
   $("ws-import-file").value = "";
 });
+$("sched-load").addEventListener("click", loadSchedule);
+$("sched-save").addEventListener("click", saveSchedule);
+$("sched-clear").addEventListener("click", clearSchedule);
+$("sched-status").addEventListener("click", loadScheduleStatus);
 $("analyze").addEventListener("click", () => run(false));
 $("save").addEventListener("click", () => run(true));
 $("suggestion").addEventListener("click", showSuggestion);

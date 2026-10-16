@@ -38,6 +38,10 @@ Open <http://localhost:8080>. The service exposes:
 - `GET  /api/workspaces/{ws}/webhook` — read the stored outbound webhook (`{"workspace": ws, "url": ""}` when unset).
 - `PUT  /api/workspaces/{ws}/webhook` — set the webhook with `{"url": "https://..."}`; an empty URL clears it.
 - `DELETE /api/workspaces/{ws}/webhook` — clear the webhook.
+- `GET  /api/workspaces/{ws}/schedule` — read the recurring scan schedule (disabled default when unset).
+- `PUT  /api/workspaces/{ws}/schedule` — set the schedule with `{"interval_hours": 1..168, "enabled": true, "scan": {...}}`; `{}` or `{"enabled": false}` disables but keeps the config.
+- `DELETE /api/workspaces/{ws}/schedule` — clear the schedule.
+- `GET  /api/schedule/status` — scheduler status (`enabled`, `tick_seconds`, `due`, `schedules`).
 
 ### Scan request body
 
@@ -273,6 +277,110 @@ list. Delivery is best-effort: a single plain `urllib.request` POST with
 or failing endpoint is logged to stderr and never blocks or changes the scan
 response, so `POST /api/scans` still returns HTTP 201 with the unchanged scan
 document.
+
+### Scheduled drift scans and digests
+
+A workspace can register a recurring drift check so the team does not have to
+remember to create a scan after every release. The background scheduler runs
+each enabled schedule that is due, stores the resulting scan exactly like a
+manual one and POSTs a digest to the workspace webhook.
+
+```sh
+# register a nightly scan for ws1
+curl -sS -X PUT localhost:8080/api/workspaces/ws1/schedule \
+  -H 'content-type: application/json' \
+  --data '{
+    "interval_hours": 24,
+    "enabled": true,
+    "scan": {
+      "name": "Nightly drift",
+      "changelog": "renamed \"Save\" to \"Save changes\"",
+      "pages": [{"path": "help/getting-started.md", "content": "Click Save."}]
+    }
+  }' | python3 -m json.tool
+
+curl -sS localhost:8080/api/workspaces/ws1/schedule | python3 -m json.tool
+curl -sS -X DELETE localhost:8080/api/workspaces/ws1/schedule
+curl -sS localhost:8080/api/schedule/status | python3 -m json.tool
+```
+
+`GET .../schedule` returns the stored config (or a disabled default with
+`interval_hours: 0` when unset). `PUT .../schedule` accepts:
+
+```json
+{
+  "interval_hours": 24,
+  "enabled": true,
+  "scan": {"name": "Nightly drift", "changelog": "...", "pages": []}
+}
+```
+
+- `interval_hours` must be an integer in the range `1..168` (whole hours only;
+  there is no cron expression support). A non-integer, `0`, `200` or `"soon"`
+  returns HTTP 400.
+- `scan` is the same payload shape as `POST /api/scans` and is required when
+  setting an interval; a body without a usable `scan` object returns HTTP 400.
+- An empty body `{}` or `{"enabled": false}` disables the schedule but keeps the
+  stored interval and scan payload. `DELETE` clears it and returns
+  `{"deleted": "ws1"}`.
+- An invalid workspace id returns HTTP 400 on every schedule route.
+
+When a schedule is due, the scheduler runs the stored `scan` payload through the
+ordinary analysis path, stores the scan (with the schedule's `workspace`) and
+advances `next_run_at` by `interval_hours`. It then POSTs a **digest** payload
+built by `notify.build_digest` to the workspace webhook:
+
+```json
+{
+  "scan_id": "a1b2c3d4e5f6",
+  "workspace": "ws1",
+  "created_at": "2026-01-01T12:00:00+00:00",
+  "total_findings": 3,
+  "by_severity": {"high": 1, "medium": 1, "low": 1},
+  "new_high": [
+    {
+      "id": "0f9c...",
+      "kind": "label",
+      "page": "help/getting-started.md",
+      "title": "UI label \"Save\" changed in the release",
+      "old_value": "Save",
+      "new_value": "Save changes",
+      "score": 95.0,
+      "severity": "high"
+    }
+  ],
+  "url": "/api/scans/a1b2c3d4e5f6"
+}
+```
+
+`by_severity` counts every finding in the scan. `new_high` reuses the
+high-severity scope of `notify.build_payload` and keeps only findings whose
+`(kind, page, old_value, new_value)` key was absent from the previous stored
+scan for that workspace, so a schedule that fires with no changes sends an empty
+`new_high` list. Digest delivery is the same best-effort webhook POST as
+ordinary notifications: a failure is logged to stderr and never stops the
+scheduler or the other due schedules.
+
+`GET /api/schedule/status` always returns HTTP 200 with:
+
+```json
+{
+  "enabled": true,
+  "tick_seconds": 60,
+  "due": [{"workspace": "ws1", "next_run_at": "2026-01-01T00:00:00+00:00", "interval_hours": 24}],
+  "schedules": [{"workspace": "ws1", "interval_hours": 24, "enabled": true, "scan": {}, "next_run_at": "2026-01-01T00:00:00+00:00"}]
+}
+```
+
+The scheduler is started by `python -m docs_drift_detector` as a daemon thread
+and shut down cleanly on `SIGTERM`/`SIGINT`. It is **single-process, in-memory
+and best-effort**: it runs only inside the HTTP process that started it, a
+process restart skips any tick that was missed while it was down, and there is
+no cron expression support. Two environment variables control it:
+
+- `DDR_SCHEDULER_TICK` — scheduler tick in seconds (default `60`).
+- `DDR_SCHEDULER_ENABLED` — set to `0` to disable the background scheduler
+  (default `1`); the status endpoint still works and reports `"enabled": false`.
 
 ### Pull-request suggestion
 

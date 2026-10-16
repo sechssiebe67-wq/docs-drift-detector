@@ -118,6 +118,21 @@ manual review marathon.
   come from `notify.build_payload`, so PR suggestions and webhooks stay
   consistent. A scan with no high-severity findings still returns a document
   with an empty `files` list and a body stating that no action is required.
+- **Scheduled drift scans with digest notifications.** A workspace can register
+  a recurring drift check (`GET`/`PUT`/`DELETE /api/workspaces/{ws}/schedule`)
+  carrying an interval in hours (`1..168`), an optional stored `scan` payload
+  (the same shape as `POST /api/scans`) and an `enabled` flag. A background
+  scheduler started by `python -m docs_drift_detector` (daemon thread, tick
+  controlled by `DDR_SCHEDULER_TICK`, default 60s; disable with
+  `DDR_SCHEDULER_ENABLED=0`) runs each enabled schedule whose `next_run_at` is
+  due through the ordinary scan path, stores it like a manual scan, advances
+  `next_run_at` by `interval_hours` and POSTs a **digest** payload to the
+  workspace webhook. The digest (`notify.build_digest`) summarises the stored
+  scan: counts by severity, the high-severity findings that are new since the
+  previous scheduled scan, and a link to the scan. Operators can inspect the
+  scheduler through `GET /api/schedule/status` (`enabled`, `tick_seconds`,
+  `due`, `schedules`). A schedule that fires with no changes still produces a
+  stored scan with zero new high-severity findings and never fails.
 - **Operational endpoints.** `GET /healthz` plus a stateless JSON API.
 
 ## Differentiation
@@ -139,8 +154,9 @@ release-to-docs comparison with text and screenshot matching.
 - Screenshot diffing with per-region highlighting instead of change signals.
 - Pluggable connectors for GitHub commit ranges and rendered docs sites.
 - Per-workspace repositories and doc-page quotas for the tiered SaaS plan.
-- Scheduled drift scans with digest notifications, building on the export
-  document and the per-rule provenance now captured in every scan.
+- Richer scheduling: cron expressions, per-workspace time zones and
+  multi-process/durable job execution instead of the single in-process
+  scheduler thread shipped now.
 
 ## Non-goals and known limits
 
@@ -151,6 +167,11 @@ release-to-docs comparison with text and screenshot matching.
 - Webhook delivery is best-effort with no retry queue, so a scan is never
   delayed or failed by a webhook. Delivery is plain HTTP POST with no HMAC
   signing yet, so receivers should treat the endpoint as untrusted.
+- The scheduler is single-process and in-memory: it runs only inside the HTTP
+  process that started it, there is no cron expression support (intervals are
+  whole hours only) and no durable job queue, so a process restart skips any
+  tick that was missed while it was down. Digest delivery is the same
+  best-effort webhook POST as ordinary notifications.
 - The tool recommends work; it does not autonomously edit documentation.
 
 ## Revenue hypothesis
