@@ -15,6 +15,7 @@ from . import (
     analyze,
     buckets,
     csv_export,
+    dashboard,
     export,
     github,
     pagination,
@@ -287,6 +288,27 @@ class Handler(BaseHTTPRequestHandler):
                 limit = MAX_DIGEST_HISTORY
             digests = self.server.store.list_workspace_digests(parts[2], limit)
             return self._json(200, {"workspace": parts[2], "digests": digests})
+        if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "dashboard":
+            if not _valid_id(parts[2]):
+                return self._error(400, "invalid workspace id")
+            bucket, limit = self._bucket_options()
+            if bucket is None or limit is None:
+                return self._error(400, "invalid bucket or limit")
+            window = self._window_options()
+            if window is None:
+                return self._error(400, "invalid from or to")
+            start, end = window
+            scans = self.server.store.list_workspace_scans(parts[2])
+            document = dashboard.build_dashboard(
+                scans,
+                parts[2],
+                limit=limit,
+                bucket=bucket,
+                from_time=start,
+                to_time=end,
+                store=self.server.store,
+            )
+            return self._json(200, document)
         if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "trend":
             if not _valid_id(parts[2]):
                 return self._error(400, "invalid workspace id")
