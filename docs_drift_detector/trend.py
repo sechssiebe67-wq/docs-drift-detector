@@ -17,26 +17,22 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from . import timewindow
+from . import pagination, timewindow
 
-DEFAULT_LIMIT = 10
-MAX_LIMIT = 50
+DEFAULT_LIMIT = pagination.DEFAULT_LIMIT
+MAX_LIMIT = pagination.MAX_LIMIT
 
 _SEVERITIES = ("high", "medium", "low")
 
 
 def _clamp_limit(limit: Any) -> int:
     """Clamp ``limit`` into ``1..MAX_LIMIT``; fall back to ``DEFAULT_LIMIT``."""
-    if isinstance(limit, bool) or not isinstance(limit, int):
-        try:
-            limit = int(limit)
-        except (TypeError, ValueError):
-            return DEFAULT_LIMIT
-    if limit < 1:
-        return 1
-    if limit > MAX_LIMIT:
-        return MAX_LIMIT
-    return limit
+    return pagination.clamp_limit(limit)
+
+
+def _scan_key(scan: Dict[str, Any]) -> tuple:
+    """Return the stable cursor sort key ``(created_at, scan_id)`` for a scan."""
+    return (str(scan.get("created_at") or ""), str(scan.get("id") or ""))
 
 
 def _zero_severity() -> Dict[str, int]:
@@ -125,25 +121,29 @@ def build_trend(
     limit: int = DEFAULT_LIMIT,
     from_time: Optional[datetime] = None,
     to_time: Optional[datetime] = None,
+    cursor: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build the per-workspace drift trend document.
 
-    The store's stored scans are selected newest-first, filtered to the optional
-    inclusive ``from_time``/``to_time`` ``created_at`` window (either side may
-    be ``None``), bounded to ``limit`` (clamped into ``1..MAX_LIMIT``) and
-    presented oldest-first as a chronological series. The ``summary`` block
-    aggregates the window and sets ``delta_high`` to
+    The store's stored scans are filtered to the optional inclusive
+    ``from_time``/``to_time`` ``created_at`` window (either side may be
+    ``None``), then paginated oldest-first. Without a ``cursor`` the most recent
+    ``limit`` scans are returned (clamped into ``1..MAX_LIMIT``) exactly as
+    before; with one, the ``limit`` scans immediately older than the cursor's
+    anchor are returned. ``next_cursor`` is the opaque cursor for the oldest scan
+    on the page, or ``None`` on the last page. The ``summary`` block aggregates
+    the returned page and sets ``delta_high`` to
     ``newest.high_open - oldest.high_open`` (``0`` when fewer than two scans are
-    in the window). Malformed scans and missing fields are skipped or defaulted
+    in the page). Malformed scans and missing fields are skipped or defaulted
     to ``0`` so the function never raises; when a window is supplied a scan
-    whose ``created_at`` cannot be parsed is excluded.
+    whose ``created_at`` cannot be parsed is excluded. A malformed ``cursor``
+    raises :class:`docs_drift_detector.pagination.CursorError`.
     """
-    bounded = _clamp_limit(limit)
     scans = store.list_workspace_scans(workspace)
     if not isinstance(scans, list):
         scans = []
     windowed = bool(from_time is not None or to_time is not None)
-    recent: List[Dict[str, Any]] = []
+    valid: List[Dict[str, Any]] = []
     for scan in scans:
         if not isinstance(scan, dict):
             continue
@@ -151,12 +151,14 @@ def build_trend(
             moment = timewindow.parse_stored(scan.get("created_at"))
             if moment is None or not timewindow.in_window(moment, from_time, to_time):
                 continue
-        recent.append(scan)
-        if len(recent) >= bounded:
-            break
-    entries = [summarise_scan(scan) for scan in reversed(recent)]
+        valid.append(scan)
+    page, next_cursor = pagination.paginate(
+        list(reversed(valid)), cursor, limit, _scan_key
+    )
+    entries = [summarise_scan(scan) for scan in page]
     return {
         "workspace": workspace,
         "scans": entries,
         "summary": _summary(entries),
+        "next_cursor": next_cursor,
     }

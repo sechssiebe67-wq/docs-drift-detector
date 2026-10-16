@@ -276,7 +276,9 @@ class BucketUnitTest(unittest.TestCase):
             ),
         ]
         document = buckets.build_rollup_buckets(scans, bucket="week")
-        self.assertEqual(set(document), {"bucket", "buckets", "workspaces", "summary"})
+        self.assertEqual(
+            set(document), {"bucket", "buckets", "workspaces", "summary", "next_cursor"}
+        )
         self.assertEqual(len(document["buckets"]), 1)
         breakdown = document["buckets"][0]["workspaces"]
         self.assertEqual([entry["workspace"] for entry in breakdown], ["wsA", "wsB"])
@@ -476,7 +478,9 @@ class BucketServerTest(unittest.TestCase):
         )
         status, document = self._request("GET", "/api/trend/buckets?bucket=week")
         self.assertEqual(status, 200)
-        self.assertEqual(set(document), {"bucket", "buckets", "workspaces", "summary"})
+        self.assertEqual(
+            set(document), {"bucket", "buckets", "workspaces", "summary", "next_cursor"}
+        )
         breakdown = document["buckets"][0]["workspaces"]
         self.assertEqual(
             [entry["workspace"] for entry in breakdown], ["wsCrA", "wsCrB"]
