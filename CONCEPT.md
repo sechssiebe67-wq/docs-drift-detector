@@ -193,6 +193,28 @@ manual review marathon.
   store's scan listing so it sees every stored scan rather than one workspace,
   and skips malformed scans (`id`/`created_at` missing or invalid) rather than
   raising.
+- **Time-bucketed drift trend.** Rather than presenting scans in scan order,
+  `GET /api/workspaces/{ws}/trend/buckets` groups a workspace's stored scans into
+  calendar periods by `created_at`, so a team can compare a release week against
+  a quiet week or watch high-severity drift accumulate. It takes `bucket`
+  (`day`|`week`, default `week`; weeks are ISO weeks starting Monday, UTC) and
+  `limit` (integer, default `10`, clamped `1..50`) and returns
+  `{"workspace", "bucket", "buckets", "summary"}`. Each bucket carries a stable
+  `key` (`2026-01-05` for `day`, `2026-W02` for `week`), a UTC ISO-8601
+  `start`/`end` range, the `scans` count and the same per-bucket aggregate fields
+  the trend summary exposes (`total_findings`, `by_severity`, `open_findings`,
+  `high_open`, `suppressed`); buckets are ordered oldest-first and `summary`
+  aggregates the window plus `delta_high` (`newest bucket high_open - oldest
+  bucket high_open`, `0` when fewer than two buckets). Per-scan counts come from
+  `trend.summarise_scan`, so they never diverge from the trend/roll-up endpoints,
+  and malformed scans are skipped exactly like `rollup.build_rollup`. The
+  cross-workspace companion `GET /api/trend/buckets` applies the same bucketing
+  to *all* workspaces and returns `{"bucket", "buckets", "workspaces",
+  "summary"}` where each bucket also breaks down per workspace and the top-level
+  `workspaces` list is sorted by descending `high_open` then workspace name. Both
+  endpoints are strictly read-only (never mutate the store, dispatch a webhook,
+  open a pull request or record a digest) and a well-formed but unknown workspace
+  returns HTTP 200 with empty `buckets`.
 - **Per-workspace scan retention.** A workspace can cap how many stored scans it
   keeps (`GET`/`PUT`/`DELETE /api/workspaces/{ws}/retention`, with
   `max_scans` in `0..10000`; `0` clears the policy and an unset workspace
@@ -224,11 +246,14 @@ release-to-docs comparison with text and screenshot matching.
   retention** policy now caps unbounded store growth by pruning the oldest scans
   after each stored scan, and the **per-workspace digest history** now makes
   scheduled digests auditable after the fact. A per-workspace **drift trend**
-  view now ships (`GET /api/workspaces/{ws}/trend`), and the cross-workspace
-  **drift roll-up** now closes the portfolio gap (`GET /api/trend`), so the
-  remaining trend gap is time-based bucketing rather than scan order. What
-  remains is broader connector coverage and making repositories first-class
-  per-workspace objects.
+  view now ships (`GET /api/workspaces/{ws}/trend`), the cross-workspace
+  **drift roll-up** now closes the portfolio gap (`GET /api/trend`), and the
+  **time-bucketed trend** (`GET /api/workspaces/{ws}/trend/buckets`,
+  `GET /api/trend/buckets`) now closes the time-based-bucketing gap so periods
+  can be compared week over week. What remains for the trend surface is
+  date-range filtering (an explicit `from`/`to` window) and pagination of older
+  buckets; broader connector coverage and making repositories first-class
+  per-workspace objects remain as well.
 - Screenshot diffing with per-region highlighting instead of change signals.
 - Pluggable connectors for GitHub commit ranges and rendered docs sites.
 - Per-workspace repositories and doc-page quotas for the tiered SaaS plan.
@@ -268,13 +293,26 @@ release-to-docs comparison with text and screenshot matching.
 - The drift trend is bounded (`limit` clamped to `1..50`, default `10`) and
   keyed by workspace only: it reads the single JSON store, presents scans in
   scan order rather than time buckets, has no pagination, and offers no
-  cross-workspace or global trend.
+  cross-workspace or global trend. The time-bucketed variant
+  (`GET /api/workspaces/{ws}/trend/buckets`) closes the scan-order gap but is
+  itself bounded (`limit` buckets clamped to `1..50`, default `10`, `bucket` is
+  `day` or `week` only) and workspace-keyed: it has no explicit date-range
+  filter, no `month` (or larger) bucket, no pagination beyond `limit`, and no
+  time-zone parameter (buckets are always UTC).
 - The cross-workspace drift roll-up (`GET /api/trend`) is bounded (`limit`
   clamped to `1..50`, default `10`) and keyed by workspace: it reads the single
   JSON store, presents one chronological window in scan order rather than time
   buckets, has no pagination, date-range or per-severity filtering, and the
   `workspaces` aggregate grows with the number of distinct workspaces in the
-  window (scans without a workspace appear under the empty-string bucket).
+  window (scans without a workspace appear under the empty-string bucket). Its
+  time-bucketed companion (`GET /api/trend/buckets`) shares those limits
+  (`day`/`week` only, `limit` buckets clamped to `1..50`, UTC only, no date-range
+  filter or pagination) and likewise has no per-severity filtering.
+- Both time-bucketed trend endpoints are strictly read-only: they read the single
+  JSON store and never mutate it, dispatch a webhook, open a pull request or
+  record a digest. Their `bucket`/`limit` bounds above are the only inputs, and
+  an unsupported `bucket` value or non-integer `limit` is rejected with HTTP 400
+  rather than silently defaulted.
 
 ## Revenue hypothesis
 
