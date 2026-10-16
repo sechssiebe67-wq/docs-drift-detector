@@ -54,6 +54,8 @@ Open <http://localhost:8080>. The service exposes:
 - `GET  /api/workspaces/{ws}/trend/buckets` — time-bucketed drift trend (`bucket` optional `day`|`week`, default `week`; `limit` optional, default `10`, max `50`; `from`/`to` optional inclusive window; `cursor` optional page cursor).
 - `GET  /api/trend` — cross-workspace drift roll-up across the scans of all workspaces (`limit` optional, default `10`, max `50`; `from`/`to` optional inclusive window; `cursor` optional page cursor).
 - `GET  /api/trend/buckets` — cross-workspace time-bucketed drift roll-up (`bucket` optional `day`|`week`, default `week`; `limit` optional, default `10`, max `50`; `from`/`to` optional inclusive window; `cursor` optional page cursor).
+- `GET  /api/workspaces/{ws}/trend/buckets.csv` — time-bucketed drift trend as a CSV attachment (same query parameters as `/trend/buckets`).
+- `GET  /api/trend/buckets.csv` — cross-workspace time-bucketed drift roll-up as a CSV attachment (same query parameters as `/trend/buckets`).
 
 ### Scan request body
 
@@ -880,6 +882,50 @@ curl -sS "localhost:8080/api/workspaces/ws1/trend?limit=2&cursor=${CURSOR}" \
 - A blank cursor (`cursor=`) is treated as absent.
 - Pagination composes with the inclusive `from`/`to` window and `bucket`
   selection: only in-window scans/buckets are paged.
+
+### CSV export (trend endpoints)
+
+The two **time-bucketed** trend endpoints can be downloaded as a CSV attachment
+instead of JSON, so a lead can paste the weekly numbers straight into a
+spreadsheet or attach them to a release review:
+
+- `GET /api/workspaces/{ws}/trend/buckets.csv` — the per-workspace document,
+  one row per bucket.
+- `GET /api/trend/buckets.csv` — the cross-workspace roll-up, one row per bucket
+  per workspace (a bucket with no workspace breakdown still emits one row with an
+  empty `workspace`).
+
+Both are read-only, use the exact same `bucket`, `limit`, `from`/`to` and
+`cursor` query parameters as their JSON siblings, and stream
+`Content-Type: text/csv; charset=utf-8` with a `Content-Disposition: attachment`
+filename.
+
+```sh
+curl -sS 'localhost:8080/api/workspaces/ws1/trend/buckets.csv?bucket=week&limit=5'
+# key,start,end,scans,total_findings,by_severity_high,by_severity_medium,by_severity_low,open_findings,high_open,suppressed
+# 2026-W02,2026-01-05T00:00:00+00:00,2026-01-11T23:59:59+00:00,2,3,2,1,0,3,2,0
+
+curl -sS 'localhost:8080/api/trend/buckets.csv?bucket=day' > trend.csv
+```
+
+- Every data row carries `key`, `start`, `end`, `scans`, `total_findings`,
+  `by_severity_high`, `by_severity_medium`, `by_severity_low`, `open_findings`,
+  `high_open` and `suppressed`; the roll-up adds a trailing `workspace` column.
+  The values are the same ones the JSON `buckets` array reports, so the CSV and
+  JSON never diverge.
+- Rows follow the JSON order exactly: buckets oldest-first, and within the
+  roll-up the per-bucket `workspaces` breakdown order (descending `high_open`
+  then workspace name).
+- Values are RFC 4180 quoted only when they contain `,`, `"` or a newline; a
+  plain value (including an empty `workspace`) stays unquoted.
+- A malformed `bucket` (for example `bucket=month`), non-integer `limit`
+  (`limit=abc`), malformed `from`/`to` (`from=not-a-date`) or malformed `cursor`
+  returns HTTP 400 with the same JSON error body as the JSON siblings. A
+  well-formed but unknown workspace returns HTTP 200 with a header-only CSV.
+- The CSV rendering lives in the dependency-free
+  `docs_drift_detector/csv_export.py` (`to_csv(document, kind)`) and reuses the
+  `buckets.build_workspace_buckets` / `buckets.build_rollup_buckets` output
+  rather than recomputing anything.
 
 ### Pull-request suggestion
 
