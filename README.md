@@ -50,6 +50,8 @@ Open <http://localhost:8080>. The service exposes:
 - `DELETE /api/workspaces/{ws}/retention` — clear the retention policy.
 - `GET  /api/schedule/status` — scheduler status (`enabled`, `tick_seconds`, `due`, `schedules`).
 - `GET  /api/workspaces/{ws}/digests` — recent scheduled-scan digests for a workspace, newest first (`limit` optional, default `10`).
+- `GET  /api/workspaces/{ws}/digests.csv` — the digest history as a CSV attachment (same `limit` as `/digests`).
+- `GET  /api/workspaces/{ws}/digests.jsonl` — the digest history as a newline-delimited JSON attachment (same `limit` as `/digests`).
 - `GET  /api/workspaces/{ws}/trend` — chronological drift trend across a workspace's scans (`limit` optional, default `10`, max `50`; `from`/`to` optional inclusive window; `cursor` optional page cursor).
 - `GET  /api/workspaces/{ws}/trend/buckets` — time-bucketed drift trend (`bucket` optional `day`|`week`, default `week`; `limit` optional, default `10`, max `50`; `from`/`to` optional inclusive window; `cursor` optional page cursor).
 - `GET  /api/trend` — cross-workspace drift roll-up across the scans of all workspaces (`limit` optional, default `10`, max `50`; `from`/`to` optional inclusive window; `cursor` optional page cursor).
@@ -459,6 +461,52 @@ curl -sS 'localhost:8080/api/workspaces/ws1/digests?limit=5' | python3 -m json.t
 - An invalid workspace id (for example `bad id!`) returns HTTP 400. A
   well-formed but unknown workspace returns HTTP 200 with an empty `digests`
   list.
+
+##### Digest-history CSV/JSONL export
+
+The digest history can also be downloaded as a dependency-free CSV or
+newline-delimited JSON attachment instead of JSON, so what the scheduler POSTed
+can be pasted into a spreadsheet or attached to a release review without
+reshaping the JSON by hand:
+
+- `GET /api/workspaces/{ws}/digests.csv` — one row per digest entry.
+- `GET /api/workspaces/{ws}/digests.jsonl` — one self-contained JSON object per
+  digest entry.
+
+```sh
+curl -sS 'localhost:8080/api/workspaces/ws1/digests.csv?limit=5'
+# created_at,scan_id,total_findings,by_severity_high,by_severity_medium,by_severity_low,new_high_count,delivery_ok,delivery_error,attempts
+# 2026-01-01T12:00:00+00:00,a1b2c3d4e5f6,3,1,1,1,1,True,,1
+
+curl -sS 'localhost:8080/api/workspaces/ws1/digests.jsonl?limit=5' > digests.jsonl
+# {"attempts": 1, "by_severity": {"high": 1, "low": 1, "medium": 1}, "created_at": "2026-01-01T12:00:00+00:00", "delivery_error": "", "delivery_ok": true, "new_high_count": 1, "scan_id": "a1b2c3d4e5f6", "total_findings": 3}
+```
+
+Both routes are read-only and accept the same optional integer `limit` as
+`GET /api/workspaces/{ws}/digests` (default `10`, clamped to `1..20`; an invalid
+value falls back to the default rather than erroring). They stream
+`Content-Type: text/csv; charset=utf-8` / `application/x-ndjson; charset=utf-8`
+with a `Content-Disposition: attachment` filename
+(`docs-drift-<ws>-digests.csv` / `docs-drift-<ws>-digests.jsonl`).
+
+- Every CSV column `created_at`, `scan_id`, `total_findings`,
+  `by_severity_high`, `by_severity_medium`, `by_severity_low`,
+  `new_high_count`, `delivery_ok`, `delivery_error`, `attempts`; the JSONL lines
+  carry the same fields with a nested `by_severity` object instead of the three
+  flattened columns (`json.dumps(..., ensure_ascii=False, sort_keys=True)`).
+- Rows/lines are ordered **newest-first** and carry the same entries, order and
+  counts the JSON endpoint returns for the same `limit`, because the export
+  reuses the `store.list_workspace_digests` output rather than recomputing
+  anything.
+- CSV values are RFC 4180 quoted only when they contain `,`, `"` or a newline; a
+  plain value stays unquoted. JSONL lines each end in `\n` with a trailing
+  newline after the last line.
+- An invalid workspace id (for example `bad id!`) returns HTTP 400. A
+  well-formed but unknown workspace (or one with no digests) returns HTTP 200
+  with a header-only CSV or an empty JSONL body, and a malformed (non-dict)
+  entry is skipped rather than raising.
+- The rendering lives in the dependency-free
+  `docs_drift_detector/digest_export.py` (`to_csv(document)`, `to_jsonl(document)`).
 
 The scheduler is started by `python -m docs_drift_detector` as a daemon thread
 and shut down cleanly on `SIGTERM`/`SIGINT`. It is **single-process, in-memory
