@@ -758,6 +758,16 @@ curl -sS 'localhost:8080/api/trend/buckets?bucket=day' | python3 -m json.tool
       "high_open": 2,
       "suppressed": 0,
       "delta_high": 0
+    },
+    {
+      "workspace": "ws2",
+      "scans": 1,
+      "total_findings": 0,
+      "by_severity": {"high": 0, "medium": 0, "low": 0},
+      "open_findings": 0,
+      "high_open": 0,
+      "suppressed": 0,
+      "delta_high": 0
     }
   ],
   "summary": {
