@@ -81,6 +81,67 @@ class BuildPayloadTest(unittest.TestCase):
         self.assertEqual(payload["findings"], [])
 
 
+class BuildDigestTest(unittest.TestCase):
+    @staticmethod
+    def _scan(findings, sid="s1", workspace="ws1"):
+        return {
+            "id": sid,
+            "workspace": workspace,
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "findings": findings,
+        }
+
+    def test_digest_counts_severities_and_lists_new_high(self):
+        scan = self._scan(
+            [
+                _finding("a", "high", 95.0, page="help/a.md"),
+                _finding("b", "medium", 55.0, page="help/b.md"),
+                _finding("c", "low", 10.0, page="help/c.md"),
+                _finding("d", "high", 80.0, page="help/d.md"),
+            ]
+        )
+        previous = self._scan([_finding("old", "high", 70.0, page="help/a.md")])
+        digest = notify.build_digest(scan, previous)
+        self.assertEqual(digest["scan_id"], "s1")
+        self.assertEqual(digest["workspace"], "ws1")
+        self.assertEqual(digest["created_at"], "2026-01-01T00:00:00+00:00")
+        self.assertEqual(digest["total_findings"], 4)
+        self.assertEqual(digest["by_severity"], {"high": 2, "medium": 1, "low": 1})
+        self.assertEqual([f["page"] for f in digest["new_high"]], ["help/d.md"])
+        self.assertEqual(digest["url"], "/api/scans/s1")
+        self.assertEqual(
+            set(digest["new_high"][0]),
+            {"id", "kind", "page", "title", "old_value", "new_value", "score", "severity"},
+        )
+
+    def test_digest_without_previous_marks_all_high_new(self):
+        scan = self._scan([_finding("a", "high", 95.0), _finding("b", "low", 5.0)])
+        digest = notify.build_digest(scan)
+        self.assertEqual([f["id"] for f in digest["new_high"]], ["a"])
+
+    def test_digest_empty_findings(self):
+        digest = notify.build_digest(self._scan([]), self._scan([_finding("a", "high", 95.0)]))
+        self.assertEqual(digest["total_findings"], 0)
+        self.assertEqual(digest["by_severity"], {"high": 0, "medium": 0, "low": 0})
+        self.assertEqual(digest["new_high"], [])
+
+    def test_digest_key_differs_by_page_or_value(self):
+        scan = self._scan([_finding("x", "high", 95.0, page="help/b.md")])
+        previous = self._scan([_finding("y", "high", 95.0, page="help/a.md")])
+        digest = notify.build_digest(scan, previous)
+        self.assertEqual([f["page"] for f in digest["new_high"]], ["help/b.md"])
+
+    def test_digest_is_json_serialisable(self):
+        encoded = json.dumps(notify.build_digest(self._scan([_finding("a", "high", 95.0)])))
+        self.assertIn('"new_high"', encoded)
+        self.assertIn('"by_severity"', encoded)
+
+    def test_digest_tolerates_non_dict_scan(self):
+        digest = notify.build_digest(None)
+        self.assertEqual(digest["total_findings"], 0)
+        self.assertEqual(digest["new_high"], [])
+
+
 class _FakeResponse:
     def __init__(self, status):
         self.status = status

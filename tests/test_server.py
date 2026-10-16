@@ -677,6 +677,132 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(scan["name"], "Hook down")
         self.assertEqual(scan["stats"]["findings"], 1)
 
+    def test_workspace_schedule_lifecycle(self):
+        ws = "wsSchedLife"
+        body = {
+            "interval_hours": 24,
+            "enabled": True,
+            "scan": {
+                "name": "Nightly",
+                "changelog": 'renamed "Save" to "Save changes"',
+                "pages": [{"path": "help/a.md", "content": "Click Save."}],
+            },
+        }
+        status, payload = self._json("PUT", "/api/workspaces/%s/schedule" % ws, body)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["interval_hours"], 24)
+        self.assertTrue(payload["enabled"])
+        self.assertTrue(payload["next_run_at"])
+        self.assertEqual(payload["scan"]["name"], "Nightly")
+
+        status, fetched = self._json("GET", "/api/workspaces/%s/schedule" % ws)
+        self.assertEqual(status, 200)
+        self.assertEqual(fetched, payload)
+
+        status, deleted = self._json("DELETE", "/api/workspaces/%s/schedule" % ws)
+        self.assertEqual(status, 200)
+        self.assertEqual(deleted, {"deleted": ws})
+
+        status, after = self._json("GET", "/api/workspaces/%s/schedule" % ws)
+        self.assertEqual(status, 200)
+        self.assertEqual(after["interval_hours"], 0)
+        self.assertFalse(after["enabled"])
+
+    def test_workspace_schedule_unknown_default(self):
+        status, payload = self._json("GET", "/api/workspaces/wsNeverSched/schedule")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["workspace"], "wsNeverSched")
+        self.assertEqual(payload["interval_hours"], 0)
+        self.assertFalse(payload["enabled"])
+        self.assertEqual(payload["scan"], {})
+
+    def test_workspace_schedule_validation_errors(self):
+        ws = "wsSchedBad"
+        for interval in (0, 200, "soon"):
+            status, payload = self._json(
+                "PUT", "/api/workspaces/%s/schedule" % ws,
+                {"interval_hours": interval, "scan": {}},
+            )
+            self.assertEqual(status, 400, interval)
+            self.assertIn("error", payload)
+        for body in ({"interval_hours": 24}, {"interval_hours": 24, "scan": "nope"}, {"interval_hours": 24, "scan": None}):
+            status, payload = self._json("PUT", "/api/workspaces/%s/schedule" % ws, body)
+            self.assertEqual(status, 400, body)
+            self.assertIn("error", payload)
+
+    def test_workspace_schedule_invalid_id_returns_400(self):
+        status, _ = self._json("GET", "/api/workspaces/bad%20id!/schedule")
+        self.assertEqual(status, 400)
+        status, _ = self._json(
+            "PUT", "/api/workspaces/bad%20id!/schedule", {"interval_hours": 1, "scan": {}}
+        )
+        self.assertEqual(status, 400)
+        status, _ = self._json("DELETE", "/api/workspaces/bad%20id!/schedule")
+        self.assertEqual(status, 400)
+
+    def test_workspace_schedule_empty_body_disables_but_keeps_config(self):
+        ws = "wsSchedDisable"
+        self._json(
+            "PUT", "/api/workspaces/%s/schedule" % ws,
+            {"interval_hours": 12, "enabled": True, "scan": {"name": "Keep"}},
+        )
+        status, payload = self._json("PUT", "/api/workspaces/%s/schedule" % ws, {})
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["enabled"])
+        self.assertEqual(payload["interval_hours"], 12)
+        self.assertEqual(payload["scan"]["name"], "Keep")
+
+        status, payload = self._json(
+            "PUT", "/api/workspaces/%s/schedule" % ws, {"enabled": False}
+        )
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["enabled"])
+        self.assertEqual(payload["interval_hours"], 12)
+
+        status, payload = self._json(
+            "PUT", "/api/workspaces/%s/schedule" % ws, {"enabled": True}
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["enabled"])
+
+    def test_schedule_status_shape(self):
+        status, payload = self._json("GET", "/api/schedule/status")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            set(payload), {"enabled", "tick_seconds", "due", "schedules"}
+        )
+        self.assertIsInstance(payload["enabled"], bool)
+        self.assertIsInstance(payload["tick_seconds"], int)
+        self.assertIsInstance(payload["due"], list)
+        self.assertIsInstance(payload["schedules"], list)
+
+    def test_schedule_status_lists_schedules_and_due(self):
+        ws = "wsSchedStatus"
+        self._json(
+            "PUT", "/api/workspaces/%s/schedule" % ws,
+            {"interval_hours": 1, "enabled": True, "scan": {"name": "S"}},
+        )
+        status, payload = self._json("GET", "/api/schedule/status")
+        self.assertEqual(status, 200)
+        self.assertIn(ws, [s["workspace"] for s in payload["schedules"]])
+        self.assertEqual(payload["due"], [])
+        self.assertEqual(
+            set(payload["schedules"][0]),
+            {"workspace", "interval_hours", "enabled", "scan", "next_run_at"},
+        )
+
+    def test_schedule_status_works_when_disabled(self):
+        os.environ["DDR_SCHEDULER_ENABLED"] = "0"
+        try:
+            status, payload = self._json("GET", "/api/schedule/status")
+        finally:
+            os.environ.pop("DDR_SCHEDULER_ENABLED", None)
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["enabled"])
+        self.assertEqual(
+            set(payload), {"enabled", "tick_seconds", "due", "schedules"}
+        )
+
     def _high_severity_scan(self, name="PR scan"):
         body = {
             "name": name,

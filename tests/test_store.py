@@ -380,6 +380,147 @@ class StoreTest(unittest.TestCase):
             reopened.get_workspace_webhook("ws3")["url"], "https://hooks.example.com/ok"
         )
 
+    def test_workspace_schedule_crud(self):
+        default = self.store.get_workspace_schedule("ws1")
+        self.assertEqual(default["interval_hours"], 0)
+        self.assertFalse(default["enabled"])
+        saved = self.store.set_workspace_schedule(
+            "ws1",
+            {"interval_hours": 24, "enabled": True, "scan": {"name": "Nightly"}},
+        )
+        self.assertEqual(saved["workspace"], "ws1")
+        self.assertEqual(saved["interval_hours"], 24)
+        self.assertTrue(saved["enabled"])
+        self.assertTrue(saved["next_run_at"])
+        self.assertEqual(self.store.get_workspace_schedule("ws1"), saved)
+        self.assertTrue(self.store.delete_workspace_schedule("ws1"))
+        self.assertFalse(self.store.delete_workspace_schedule("ws1"))
+        self.assertEqual(self.store.get_workspace_schedule("ws1")["interval_hours"], 0)
+
+    def test_workspace_schedule_persists_across_instances(self):
+        self.store.set_workspace_schedule(
+            "ws1", {"interval_hours": 6, "enabled": True, "scan": {"name": "Six"}}
+        )
+        reopened = Store(self.path)
+        loaded = reopened.get_workspace_schedule("ws1")
+        self.assertEqual(loaded["interval_hours"], 6)
+        self.assertEqual(loaded["scan"]["name"], "Six")
+        self.assertTrue(loaded["next_run_at"])
+
+    def test_workspace_schedule_preserves_explicit_next_run_at(self):
+        when = "2020-01-01T00:00:00+00:00"
+        saved = self.store.set_workspace_schedule(
+            "ws1",
+            {"interval_hours": 1, "enabled": True, "scan": {}, "next_run_at": when},
+        )
+        self.assertEqual(saved["next_run_at"], when)
+
+    def test_workspace_schedule_validation(self):
+        for bad in (
+            {"interval_hours": 0, "scan": {}},
+            {"interval_hours": 200, "scan": {}},
+            {"interval_hours": "soon", "scan": {}},
+            {"interval_hours": True, "scan": {}},
+            {"interval_hours": 24},
+            {"interval_hours": 24, "scan": None},
+            {"interval_hours": 24, "scan": "nope"},
+            None,
+        ):
+            with self.assertRaises(ValueError):
+                self.store.set_workspace_schedule("ws1", bad)
+        self.assertEqual(self.store.get_workspace_schedule("ws1")["interval_hours"], 0)
+
+    def test_workspace_schedule_rejects_invalid_names(self):
+        for bad in ("bad id!", "", "a" * 65, "a/b", None):
+            with self.assertRaises(ValueError):
+                self.store.get_workspace_schedule(bad)
+            with self.assertRaises(ValueError):
+                self.store.set_workspace_schedule(
+                    bad, {"interval_hours": 1, "scan": {}}
+                )
+            with self.assertRaises(ValueError):
+                self.store.delete_workspace_schedule(bad)
+            with self.assertRaises(ValueError):
+                self.store.latest_workspace_scan(bad)
+
+    def test_list_due_schedules(self):
+        past = "2020-01-01T00:00:00+00:00"
+        future = "2999-01-01T00:00:00+00:00"
+        self.store.set_workspace_schedule(
+            "wsPast", {"interval_hours": 1, "enabled": True, "scan": {}, "next_run_at": past}
+        )
+        self.store.set_workspace_schedule(
+            "wsFuture", {"interval_hours": 1, "enabled": True, "scan": {}, "next_run_at": future}
+        )
+        self.store.set_workspace_schedule(
+            "wsOff", {"interval_hours": 1, "enabled": False, "scan": {}, "next_run_at": past}
+        )
+        due = self.store.list_due_schedules("2026-01-01T00:00:00+00:00")
+        self.assertEqual([config["workspace"] for config in due], ["wsPast"])
+
+    def test_list_due_schedules_accepts_datetime(self):
+        past = "2020-01-01T00:00:00+00:00"
+        self.store.set_workspace_schedule(
+            "wsPast", {"interval_hours": 1, "enabled": True, "scan": {}, "next_run_at": past}
+        )
+        from datetime import datetime, timezone
+
+        self.assertEqual(
+            [c["workspace"] for c in self.store.list_due_schedules(datetime.now(timezone.utc))],
+            ["wsPast"],
+        )
+
+    def test_list_workspace_schedules(self):
+        self.store.set_workspace_schedule(
+            "wsB", {"interval_hours": 1, "enabled": True, "scan": {"name": "b"}}
+        )
+        self.store.set_workspace_schedule(
+            "wsA", {"interval_hours": 2, "enabled": False, "scan": {"name": "a"}}
+        )
+        schedules = self.store.list_workspace_schedules()
+        self.assertEqual([c["workspace"] for c in schedules], ["wsA", "wsB"])
+
+    def test_latest_workspace_scan(self):
+        self.assertIsNone(self.store.latest_workspace_scan("ws1"))
+        self.store.create_scan("one", "release", [_finding()], workspace="ws1")
+        second = self.store.create_scan("two", "release", [_finding()], workspace="ws1")
+        self.store.create_scan("other", "release", [_finding()], workspace="ws2")
+        latest = self.store.latest_workspace_scan("ws1")
+        self.assertEqual(latest["id"], second["id"])
+
+    def test_old_store_without_schedules_key_loads(self):
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write('{"scans": {}}')
+        reopened = Store(self.path)
+        self.assertEqual(reopened.get_workspace_schedule("ws1")["interval_hours"], 0)
+        reopened.set_workspace_schedule("ws1", {"interval_hours": 1, "scan": {}})
+        self.assertEqual(reopened.list_workspace_schedules()[0]["workspace"], "ws1")
+
+    def test_malformed_schedules_key_is_tolerated(self):
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "scans": {"s1": {"id": "s1", "name": "Old", "stats": {}}},
+                        "workspace_schedules": {
+                            "ws1": {"interval_hours": 0, "scan": {}},
+                            "ws2": "nonsense",
+                            "ws3": {
+                                "interval_hours": 3,
+                                "enabled": True,
+                                "scan": {"name": "Keep"},
+                            },
+                            "bad id!": {"interval_hours": 1, "scan": {}},
+                        },
+                    }
+                )
+            )
+        reopened = Store(self.path)
+        self.assertIsNotNone(reopened.get_scan("s1"))
+        schedules = reopened.list_workspace_schedules()
+        self.assertEqual([c["workspace"] for c in schedules], ["ws3"])
+        self.assertEqual(schedules[0]["scan"]["name"], "Keep")
+
     @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root bypasses filesystem permissions")
     def test_create_scan_survives_write_failure(self):
         directory = os.path.join(self.tmp.name, "ro")

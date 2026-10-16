@@ -7,15 +7,33 @@ import os
 import re
 import sys
 import urllib.parse
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import analyze, export, notify, pullrequest
-from .store import Store
+from . import analyze, export, pullrequest, runner
+from .store import (
+    MAX_SCHEDULE_HOURS,
+    MIN_SCHEDULE_HOURS,
+    Store,
+)
 
 MAX_BODY = 8 * 1024 * 1024
 MAX_PAGES = 2000
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+
+
+def _scheduler_enabled_from_env() -> bool:
+    raw = os.environ.get("DDR_SCHEDULER_ENABLED", "1")
+    return str(raw).strip().lower() not in ("0", "false", "no", "off", "")
+
+
+def _scheduler_tick_from_env() -> int:
+    try:
+        value = int(os.environ.get("DDR_SCHEDULER_TICK", "60"))
+    except (TypeError, ValueError):
+        value = 60
+    return value if value > 0 else 60
 
 _CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -132,6 +150,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, "invalid workspace id")
             config = self.server.store.get_workspace_webhook(parts[2])
             return self._json(200, {"workspace": parts[2], "url": config.get("url", "")})
+        if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "schedule":
+            if not _valid_id(parts[2]):
+                return self._error(400, "invalid workspace id")
+            return self._json(200, self.server.store.get_workspace_schedule(parts[2]))
+        if parts == ["api", "schedule", "status"]:
+            return self._schedule_status()
         if (
             len(parts) == 5
             and parts[:2] == ["api", "workspaces"]
@@ -310,8 +334,16 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         parts = _split(path)
         data = self._read_json()
+        schedule_route = (
+            len(parts) == 4
+            and parts[:2] == ["api", "workspaces"]
+            and parts[3] == "schedule"
+        )
         if data is None:
-            return self._error(400, "invalid or missing JSON body")
+            if schedule_route:
+                data = {}
+            else:
+                return self._error(400, "invalid or missing JSON body")
         if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "rules":
             if not _valid_id(parts[2]):
                 return self._error(400, "invalid workspace id")
@@ -327,6 +359,10 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 return self._error(400, "invalid webhook url")
             return self._json(200, {"workspace": parts[2], "url": stored.get("url", "")})
+        if schedule_route:
+            if not _valid_id(parts[2]):
+                return self._error(400, "invalid workspace id")
+            return self._put_schedule(parts[2], data)
         return self._error(404, "not found")
 
     def do_DELETE(self) -> None:  # noqa: N802
@@ -342,6 +378,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, "invalid workspace id")
             self.server.store.delete_workspace_webhook(parts[2])
             return self._json(200, {"deleted": parts[2]})
+        if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "schedule":
+            if not _valid_id(parts[2]):
+                return self._error(400, "invalid workspace id")
+            self.server.store.delete_workspace_schedule(parts[2])
+            return self._json(200, {"deleted": parts[2]})
         if len(parts) == 3 and parts[:2] == ["api", "scans"] and _valid_id(parts[2]):
             if self.server.store.delete_scan(parts[2]):
                 return self._json(200, {"deleted": parts[2]})
@@ -352,65 +393,18 @@ class Handler(BaseHTTPRequestHandler):
     def _prepare(
         self, data: Dict[str, Any], workspace: Optional[str] = None
     ) -> Tuple[Dict[str, List[Dict[str, str]]], List[Dict[str, Any]], Dict[str, Any]]:
-        pages = self._validate_pages(data.get("pages") or data.get("docs") or [])
-        changelog = data.get("changelog") or ""
-        diff = data.get("diff") or ""
-        text = changelog + "\n" + diff
-        changes = analyze.extract_changes(
-            text, labels=data.get("labels"), routes=data.get("routes")
-        )
-        screenshots = data.get("screenshots") or []
-        metrics = data.get("metrics") or {}
-        report: Dict[str, Any] = {}
-        findings = analyze.detect_drift(
-            changes,
-            pages=pages,
-            screenshots=screenshots,
-            metrics=metrics,
-            rules=self._merge_rules(data.get("rules"), workspace),
-            stats=report,
-        )
-        suppressed = report.get("suppressed", 0)
-        suppressed_rules = report.get("suppressed_rules", [])
-        suppressed_details = report.get("suppressed_details", [])
-        return changes, findings, {
-            "pages": pages,
-            "metrics": metrics,
-            "suppressed": suppressed,
-            "suppressed_rules": suppressed_rules,
-            "suppressed_details": suppressed_details,
-        }
+        return runner.prepare_scan(self.server.store, data, workspace)
 
     def _merge_rules(self, request_rules: Any, workspace: Optional[str]) -> List[Dict[str, str]]:
-        """Combine per-scan rules with the workspace library.
-
-        Per-scan rules are normalised first and tagged with ``origin=request``;
-        stored workspace rules are tagged with ``origin=workspace``. Both sets
-        are applied so that their suppressions are additive and the provenance
-        of each suppression is preserved.
-        """
-        requested = analyze._normalise_rules(request_rules, origin="request")
-        stored = analyze._normalise_rules(
-            self.server.store.list_workspace_rules(workspace) if workspace else [],
-            origin="workspace",
-        )
-        return requested + stored
+        """Combine per-scan rules with the workspace library."""
+        return runner.merge_rules(self.server.store, request_rules, workspace)
 
     @staticmethod
     def _validate_pages(raw: Any) -> List[Dict[str, str]]:
-        if not isinstance(raw, list):
-            return []
-        pages = []
-        for item in raw[:MAX_PAGES]:
-            if isinstance(item, dict):
-                path = str(item.get("path") or item.get("url") or "(unnamed)")
-                content = item.get("content")
-                if content is None:
-                    content = item.get("text") or ""
-                pages.append({"path": path, "content": str(content)})
-            elif isinstance(item, str):
-                pages.append({"path": "(unnamed)", "content": item})
-        return pages
+        return runner.validate_pages(raw)
+
+    def _notify_webhook(self, scan: Dict[str, Any]) -> None:
+        runner.notify_webhook(self.server.store, scan)
 
     def _analyze(self, data: Dict[str, Any], store: bool) -> None:
         workspace_raw = data.get("workspace")
@@ -419,8 +413,10 @@ class Handler(BaseHTTPRequestHandler):
             workspace = str(workspace_raw).strip()
             if not _valid_id(workspace):
                 return self._error(400, "invalid workspace id")
-        changes, findings, extra = self._prepare(data, workspace)
         if not store:
+            changes, findings, extra = runner.prepare_scan(
+                self.server.store, data, workspace
+            )
             return self._json(
                 200,
                 {
@@ -434,41 +430,70 @@ class Handler(BaseHTTPRequestHandler):
                     "changes": changes,
                 },
             )
-        scan = self.server.store.create_scan(
-            name=data.get("name") or "Release scan",
-            source=data.get("source") or "release",
-            findings=findings,
-            pages=extra["pages"],
-            suppressed=extra["suppressed"],
-            workspace=workspace,
-            suppressed_rules=extra["suppressed_rules"],
-            suppressed_details=extra["suppressed_details"],
-        )
-        self._notify_webhook(scan)
+        scan = runner.run_scan(self.server.store, data, workspace)
         return self._json(201, scan)
 
-    def _notify_webhook(self, scan: Dict[str, Any]) -> None:
-        """Best-effort outbound webhook dispatch for a stored scan.
+    def _put_schedule(self, workspace: str, data: Dict[str, Any]) -> None:
+        keys = set(data.keys()) if isinstance(data, dict) else set()
+        existing = self.server.store.get_workspace_schedule(workspace)
+        if not keys or keys <= {"enabled"}:
+            enabled = bool(data.get("enabled", False)) if isinstance(data, dict) else False
+            if existing.get("interval_hours"):
+                existing["enabled"] = enabled
+                stored = self.server.store.set_workspace_schedule(workspace, existing)
+            else:
+                stored = existing
+                stored["enabled"] = enabled
+            return self._json(200, stored)
 
-        Delivery never raises and never changes the scan response; failures are
-        written to stderr only.
-        """
-        workspace = scan.get("workspace")
-        if not workspace:
-            return
+        interval = data.get("interval_hours")
+        if isinstance(interval, bool) or not isinstance(interval, int):
+            return self._error(400, "invalid interval_hours")
+        if interval < MIN_SCHEDULE_HOURS or interval > MAX_SCHEDULE_HOURS:
+            return self._error(400, "invalid interval_hours")
+        scan = data.get("scan")
+        if not isinstance(scan, dict):
+            return self._error(400, "invalid scan")
+        config = {
+            "interval_hours": interval,
+            "enabled": bool(data.get("enabled", True)),
+            "scan": scan,
+        }
         try:
-            config = self.server.store.get_workspace_webhook(workspace)
-            url = config.get("url") or ""
-            if not url:
-                return
-            result = notify.dispatch(url, notify.build_payload(scan))
-            if not result.get("ok"):
-                sys.stderr.write(
-                    "docs-drift: webhook delivery failed (workspace=%s, url=%s): %s\n"
-                    % (workspace, url, result.get("error") or result.get("status"))
-                )
-        except Exception as err:  # never let notification break the response
-            sys.stderr.write("docs-drift: webhook dispatch error: %s\n" % err)
+            stored = self.server.store.set_workspace_schedule(workspace, config)
+        except ValueError:
+            return self._error(400, "invalid schedule")
+        return self._json(200, stored)
+
+    def _schedule_status(self) -> None:
+        scheduler = getattr(self.server, "scheduler", None)
+        enabled = (
+            bool(scheduler.enabled) if scheduler is not None
+            else _scheduler_enabled_from_env()
+        )
+        tick = (
+            scheduler.tick_seconds if scheduler is not None
+            else _scheduler_tick_from_env()
+        )
+        now = datetime.now(timezone.utc)
+        due = self.server.store.list_due_schedules(now)
+        due_summary = [
+            {
+                "workspace": item.get("workspace"),
+                "next_run_at": item.get("next_run_at"),
+                "interval_hours": item.get("interval_hours"),
+            }
+            for item in due
+        ]
+        return self._json(
+            200,
+            {
+                "enabled": bool(enabled),
+                "tick_seconds": tick,
+                "due": due_summary,
+                "schedules": self.server.store.list_workspace_schedules(),
+            },
+        )
 
     def _resolve(self, scan_id: str, finding_id: str, data: Dict[str, Any]) -> None:
         resolved = bool(data.get("resolved", True))

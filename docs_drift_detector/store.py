@@ -13,7 +13,7 @@ import re
 import tempfile
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -23,6 +23,8 @@ _WORKSPACE_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 MAX_RULE_HISTORY = 20
 MAX_WEBHOOK_URL = 500
+MIN_SCHEDULE_HOURS = 1
+MAX_SCHEDULE_HOURS = 168
 _RULE_HISTORY_ACTIONS = ("set", "import", "clear", "promote")
 
 
@@ -53,6 +55,68 @@ def _validate_webhook_url(url: Any) -> str:
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise ValueError("webhook url must be http or https")
     return url
+
+
+def _parse_time(value: Any) -> Optional[datetime]:
+    """Parse a persisted timestamp into an aware UTC datetime, or return None."""
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _iso_after_hours(hours: int) -> str:
+    moment = datetime.now(timezone.utc) + timedelta(hours=hours)
+    return moment.replace(microsecond=0).isoformat()
+
+
+def _default_schedule(workspace: str) -> Dict[str, Any]:
+    return {
+        "workspace": workspace,
+        "interval_hours": 0,
+        "enabled": False,
+        "scan": {},
+        "next_run_at": "",
+    }
+
+
+def _normalise_schedule(workspace: str, config: Any) -> Dict[str, Any]:
+    """Validate and normalise a stored schedule config.
+
+    Raises :class:`ValueError` for a config that cannot be stored: it must
+    carry an integer ``interval_hours`` within ``MIN..MAX`` and a ``scan``
+    object. A missing or malformed ``next_run_at`` is recomputed for an enabled
+    schedule; a disabled schedule keeps an empty ``next_run_at``.
+    """
+    if not isinstance(config, dict):
+        raise ValueError("invalid schedule config")
+    interval = config.get("interval_hours")
+    if isinstance(interval, bool) or not isinstance(interval, int):
+        raise ValueError("invalid interval_hours")
+    if interval < MIN_SCHEDULE_HOURS or interval > MAX_SCHEDULE_HOURS:
+        raise ValueError("interval_hours out of range")
+    scan = config.get("scan")
+    if not isinstance(scan, dict):
+        raise ValueError("invalid scan")
+    enabled = bool(config.get("enabled", True))
+    next_run_at = config.get("next_run_at")
+    if _parse_time(next_run_at) is None:
+        next_run_at = _iso_after_hours(interval) if enabled else ""
+    return {
+        "workspace": workspace,
+        "interval_hours": interval,
+        "enabled": enabled,
+        "scan": copy.deepcopy(scan),
+        "next_run_at": next_run_at,
+    }
 
 
 def _normalise_history_entry(entry: Any) -> Optional[Dict[str, Any]]:
@@ -89,6 +153,7 @@ class Store:
         self._workspace_rules: Dict[str, List[Dict[str, str]]] = {}
         self._workspace_rule_history: Dict[str, List[Dict[str, Any]]] = {}
         self._workspace_webhooks: Dict[str, str] = {}
+        self._workspace_schedules: Dict[str, Dict[str, Any]] = {}
         self._load()
 
     def _load(self) -> None:
@@ -145,6 +210,18 @@ class Store:
                 if normalised:
                     loaded_webhooks[workspace] = normalised
             self._workspace_webhooks = loaded_webhooks
+        schedules = data.get("workspace_schedules")
+        if isinstance(schedules, dict):
+            loaded_schedules: Dict[str, Dict[str, Any]] = {}
+            for workspace, config in schedules.items():
+                if not isinstance(workspace, str) or not _valid_workspace(workspace):
+                    continue
+                try:
+                    normalised_schedule = _normalise_schedule(workspace, config)
+                except ValueError:
+                    continue
+                loaded_schedules[workspace] = normalised_schedule
+            self._workspace_schedules = loaded_schedules
 
     def _persist(self) -> None:
         directory = os.path.dirname(os.path.abspath(self.path))
@@ -158,6 +235,7 @@ class Store:
                         "workspace_rules": self._workspace_rules,
                         "workspace_rule_history": self._workspace_rule_history,
                         "workspace_webhooks": self._workspace_webhooks,
+                        "workspace_schedules": self._workspace_schedules,
                     },
                     handle,
                     ensure_ascii=False,
@@ -269,6 +347,66 @@ class Store:
             self._workspace_webhooks.pop(name, None)
             self._persist()
             return existed
+
+    def get_workspace_schedule(self, workspace: str) -> Dict[str, Any]:
+        """Return the stored schedule for ``workspace`` or a disabled default."""
+        name = self._check_workspace(workspace)
+        with self._lock:
+            config = self._workspace_schedules.get(name)
+            if not config:
+                return _default_schedule(name)
+            return copy.deepcopy(config)
+
+    def set_workspace_schedule(self, workspace: str, config: Any) -> Dict[str, Any]:
+        name = self._check_workspace(workspace)
+        normalised = _normalise_schedule(name, config)
+        with self._lock:
+            self._workspace_schedules[name] = normalised
+            self._persist()
+            return copy.deepcopy(normalised)
+
+    def delete_workspace_schedule(self, workspace: str) -> bool:
+        name = self._check_workspace(workspace)
+        with self._lock:
+            existed = name in self._workspace_schedules
+            self._workspace_schedules.pop(name, None)
+            self._persist()
+            return existed
+
+    def list_workspace_schedules(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            configs = [copy.deepcopy(config) for config in self._workspace_schedules.values()]
+        configs.sort(key=lambda config: config.get("workspace", ""))
+        return configs
+
+    def list_due_schedules(self, now: Any) -> List[Dict[str, Any]]:
+        """Return enabled schedules whose ``next_run_at`` is at or before ``now``."""
+        moment = _parse_time(now)
+        if moment is None:
+            moment = datetime.now(timezone.utc)
+        due: List[Dict[str, Any]] = []
+        with self._lock:
+            for config in self._workspace_schedules.values():
+                if not config.get("enabled"):
+                    continue
+                when = _parse_time(config.get("next_run_at"))
+                if when is None or when > moment:
+                    continue
+                due.append(copy.deepcopy(config))
+        due.sort(key=lambda config: (config.get("next_run_at", ""), config.get("workspace", "")))
+        return due
+
+    def latest_workspace_scan(self, workspace: str) -> Optional[Dict[str, Any]]:
+        """Return the most recent stored scan for ``workspace``, or None."""
+        name = self._check_workspace(workspace)
+        with self._lock:
+            latest = None
+            for scan in self._scans.values():
+                if scan.get("workspace") != name:
+                    continue
+                if latest is None or scan.get("created_at", "") >= latest.get("created_at", ""):
+                    latest = scan
+            return copy.deepcopy(latest) if latest is not None else None
 
     def create_scan(
         self,
