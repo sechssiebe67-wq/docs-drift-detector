@@ -146,6 +146,16 @@ manual review marathon.
   scheduler through `GET /api/schedule/status` (`enabled`, `tick_seconds`,
   `due`, `schedules`). A schedule that fires with no changes still produces a
   stored scan with zero new high-severity findings and never fails.
+- **Per-workspace scan retention.** A workspace can cap how many stored scans it
+  keeps (`GET`/`PUT`/`DELETE /api/workspaces/{ws}/retention`, with
+  `max_scans` in `0..10000`; `0` clears the policy and an unset workspace
+  reports `0`). After every stored scan the oldest scans of that workspace
+  beyond the cap are pruned automatically (`store.prune_workspace_scans`),
+  leaving scans of other workspaces and scans without a workspace untouched.
+  Pruning returns the number of deleted scans and is idempotent. It is
+  best-effort and never changes the scan response; a failure is logged to
+  stderr. The policy is stored under `workspace_retention` in the same JSON
+  file and reloading tolerates a missing or malformed key.
 - **Operational endpoints.** `GET /healthz` plus a stateless JSON API.
 
 ## Differentiation
@@ -163,8 +173,10 @@ release-to-docs comparison with text and screenshot matching.
   remains available as a dependency-free document
   (`GET /api/scans/{id}/pull-request`) for a thin CI wrapper, and the **GitHub
   connector** now opens that branch/PR autonomously, pushing the exported
-  checklist with the same high-severity scope. What remains is broader connector
-  coverage and making repositories first-class per-workspace objects.
+  checklist with the same high-severity scope. The **per-workspace scan
+  retention** policy now caps unbounded store growth by pruning the oldest scans
+  after each stored scan. What remains is broader connector coverage and making
+  repositories first-class per-workspace objects.
 - Screenshot diffing with per-region highlighting instead of change signals.
 - Pluggable connectors for GitHub commit ranges and rendered docs sites.
 - Per-workspace repositories and doc-page quotas for the tiered SaaS plan.
@@ -193,6 +205,9 @@ release-to-docs comparison with text and screenshot matching.
   it. Automatic opening is skipped when a workspace has no configured repository,
   and any failure is only logged to stderr.
 - The tool recommends work; it does not autonomously edit documentation.
+- Scan retention prunes whole scans oldest-first and is keyed by workspace only:
+  scans without a workspace are never pruned, there is no time-based expiry, and
+  the remaining scans still live in the single JSON store rather than a database.
 
 ## Revenue hypothesis
 

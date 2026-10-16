@@ -148,5 +148,69 @@ class OpenGithubPrTest(unittest.TestCase):
         self.assertEqual(calls, [])
 
 
+class RetentionPruneTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Store(os.path.join(self.tmp.name, "scans.json"))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _body(self, name="Scan"):
+        return {
+            "name": name,
+            "workspace": "ws1",
+            "changelog": 'renamed "Save" to "Save changes"',
+            "pages": [{"path": "help/a.md", "content": "Click Save."}],
+        }
+
+    def test_no_workspace_is_noop(self):
+        runner.prune_workspace_scans(self.store, {"id": "x"})
+
+    def test_unset_limit_is_noop(self):
+        self.store.create_scan("one", "release", [_finding()], workspace="ws1")
+        runner.prune_workspace_scans(self.store, _scan())
+        self.assertEqual(len(self.store.list_scans()), 1)
+
+    def test_positive_limit_prunes(self):
+        self.store.set_workspace_retention("ws1", 2)
+        for name in ("s1", "s2", "s3"):
+            self.store.create_scan(name, "release", [_finding()], workspace="ws1")
+        runner.prune_workspace_scans(self.store, _scan())
+        self.assertEqual(len(self.store.list_scans()), 2)
+
+    def test_failure_is_logged_and_does_not_raise(self):
+        def boom(workspace):
+            raise RuntimeError("kaboom")
+
+        self.store.get_workspace_retention = boom
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            runner.prune_workspace_scans(self.store, _scan())
+        self.assertIn("retention prune error", stderr.getvalue())
+        self.assertIn("kaboom", stderr.getvalue())
+
+    def test_run_scan_applies_retention(self):
+        self.store.set_workspace_retention("ws1", 1)
+        runner.run_scan(self.store, self._body("first"), "ws1", dispatch=False)
+        runner.run_scan(self.store, self._body("second"), "ws1", dispatch=False)
+        scans = self.store.list_scans()
+        self.assertEqual(len(scans), 1)
+        self.assertEqual(scans[0]["name"], "second")
+
+    def test_run_scan_survives_prune_failure(self):
+        self.store.set_workspace_retention("ws1", 1)
+
+        def boom(workspace):
+            raise RuntimeError("kaboom")
+
+        self.store.get_workspace_retention = boom
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            scan = runner.run_scan(self.store, self._body("first"), "ws1", dispatch=False)
+        self.assertEqual(scan["name"], "first")
+        self.assertIn("retention prune error", stderr.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

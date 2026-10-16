@@ -137,6 +137,27 @@ def open_github_pr(store: Any, scan: Dict[str, Any]) -> None:
         sys.stderr.write("docs-drift: pull request error: %s\n" % err)
 
 
+def prune_workspace_scans(store: Any, scan: Dict[str, Any]) -> None:
+    """Best-effort retention pruning for a stored scan's workspace.
+
+    Looks up the workspace's retention limit and prunes the oldest scans beyond
+    it. Pruning never raises into the scan path and never changes the scan
+    response; failures are written to stderr only.
+    """
+    workspace = scan.get("workspace")
+    if not workspace:
+        return
+    try:
+        limit = store.get_workspace_retention(workspace)
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+            return
+        store.prune_workspace_scans(workspace, limit)
+    except Exception as err:  # never let pruning break the response
+        sys.stderr.write(
+            "docs-drift: retention prune error (workspace=%s): %s\n" % (workspace, err)
+        )
+
+
 def run_scan(
     store: Any,
     data: Dict[str, Any],
@@ -155,6 +176,7 @@ def run_scan(
         suppressed_rules=extra["suppressed_rules"],
         suppressed_details=extra["suppressed_details"],
     )
+    prune_workspace_scans(store, scan)
     if dispatch:
         notify_webhook(store, scan)
         open_github_pr(store, scan)

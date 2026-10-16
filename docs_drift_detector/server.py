@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import analyze, export, github, pullrequest, runner
 from .store import (
     DEFAULT_GITHUB_TOKEN_ENV,
+    MAX_RETENTION_SCANS,
     MAX_SCHEDULE_HOURS,
     MIN_SCHEDULE_HOURS,
     Store,
@@ -159,6 +160,11 @@ class Handler(BaseHTTPRequestHandler):
             if not _valid_id(parts[2]):
                 return self._error(400, "invalid workspace id")
             return self._json(200, self.server.store.get_workspace_github(parts[2]))
+        if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "retention":
+            if not _valid_id(parts[2]):
+                return self._error(400, "invalid workspace id")
+            limit = self.server.store.get_workspace_retention(parts[2])
+            return self._json(200, {"workspace": parts[2], "max_scans": limit})
         if parts == ["api", "schedule", "status"]:
             return self._schedule_status()
         if (
@@ -391,6 +397,20 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 return self._error(400, "invalid github config")
             return self._json(200, stored)
+        if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "retention":
+            if not _valid_id(parts[2]):
+                return self._error(400, "invalid workspace id")
+            if "max_scans" not in data:
+                return self._error(400, "invalid max_scans")
+            try:
+                stored = self.server.store.set_workspace_retention(
+                    parts[2], data.get("max_scans")
+                )
+            except ValueError:
+                return self._error(
+                    400, "max_scans must be an integer in 0..%d" % MAX_RETENTION_SCANS
+                )
+            return self._json(200, stored)
         return self._error(404, "not found")
 
     def do_DELETE(self) -> None:  # noqa: N802
@@ -415,6 +435,11 @@ class Handler(BaseHTTPRequestHandler):
             if not _valid_id(parts[2]):
                 return self._error(400, "invalid workspace id")
             self.server.store.delete_workspace_github(parts[2])
+            return self._json(200, {"deleted": parts[2]})
+        if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "retention":
+            if not _valid_id(parts[2]):
+                return self._error(400, "invalid workspace id")
+            self.server.store.delete_workspace_retention(parts[2])
             return self._json(200, {"deleted": parts[2]})
         if len(parts) == 3 and parts[:2] == ["api", "scans"] and _valid_id(parts[2]):
             if self.server.store.delete_scan(parts[2]):

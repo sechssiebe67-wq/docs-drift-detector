@@ -45,6 +45,9 @@ Open <http://localhost:8080>. The service exposes:
 - `GET  /api/workspaces/{ws}/github` — read the stored GitHub connector config.
 - `PUT  /api/workspaces/{ws}/github` — set the connector with `{"repo": "owner/name", "base_branch": "main", "token_env": "GITHUB_TOKEN"}`; an empty `repo` clears it.
 - `DELETE /api/workspaces/{ws}/github` — clear the connector config.
+- `GET  /api/workspaces/{ws}/retention` — read the per-workspace scan retention limit (`0` when unset).
+- `PUT  /api/workspaces/{ws}/retention` — set the limit with `{"max_scans": 0..10000}`; `0` clears the policy.
+- `DELETE /api/workspaces/{ws}/retention` — clear the retention policy.
 - `GET  /api/schedule/status` — scheduler status (`enabled`, `tick_seconds`, `due`, `schedules`).
 
 ### Scan request body
@@ -385,6 +388,40 @@ no cron expression support. Two environment variables control it:
 - `DDR_SCHEDULER_TICK` — scheduler tick in seconds (default `60`).
 - `DDR_SCHEDULER_ENABLED` — set to `0` to disable the background scheduler
   (default `1`); the status endpoint still works and reports `"enabled": false`.
+
+### Scan retention
+
+Stored scans accumulate in the single JSON file. A per-workspace retention limit
+caps how many scans a workspace keeps; after every stored scan for that workspace
+the oldest scans beyond the limit are pruned automatically. Other workspaces and
+scans without a workspace are never touched.
+
+```sh
+# keep at most the 50 most recent ws1 scans
+curl -sS -X PUT localhost:8080/api/workspaces/ws1/retention \
+  -H 'content-type: application/json' \
+  --data '{"max_scans":50}' | python3 -m json.tool
+
+curl -sS localhost:8080/api/workspaces/ws1/retention | python3 -m json.tool
+curl -sS -X DELETE localhost:8080/api/workspaces/ws1/retention
+```
+
+- `GET .../retention` returns HTTP 200 with
+  `{"workspace": "ws1", "max_scans": 0}` when unset, otherwise the stored limit.
+- `PUT .../retention` accepts `{"max_scans": n}` where `n` is an integer in
+  `0..10000`. A non-integer, a negative number or `10001` returns HTTP 400. A
+  value of `0` clears the policy and returns `{"workspace": "ws1", "max_scans":
+  0}`; a positive value is stored and returned.
+- `DELETE .../retention` clears the policy and returns `{"deleted": "ws1"}`.
+- An invalid workspace id returns HTTP 400 on all three routes.
+
+Pruning happens automatically after each stored scan for that workspace, whether
+the scan was created manually or by the scheduler. It is best-effort: a failure
+(for example a malformed stored retention value) is logged to stderr and never
+changes the `POST /api/scans` response, which still returns HTTP 201 with the
+unchanged scan document. The policy is stored alongside the scans under
+`workspace_retention`, and reloading a store with a missing or malformed key
+treats every workspace as unset.
 
 ### Pull-request suggestion
 
