@@ -43,7 +43,12 @@ def _zero_severity() -> Dict[str, int]:
 def _entry(scan: Any) -> Dict[str, Any]:
     """Normalise one stored scan into a trend point, tolerating malformed data."""
     scan = scan if isinstance(scan, dict) else {}
-    findings = [f for f in (scan.get("findings") or []) if isinstance(f, dict)]
+    raw_findings = scan.get("findings")
+    findings = (
+        [f for f in raw_findings if isinstance(f, dict)]
+        if isinstance(raw_findings, list)
+        else []
+    )
     by_severity = _zero_severity()
     open_findings = 0
     high_open = 0

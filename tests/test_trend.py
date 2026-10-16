@@ -159,6 +159,41 @@ class TrendUnitTest(unittest.TestCase):
         self.assertEqual(second["high_open"], 1)
         self.assertEqual(second["suppressed"], 0)
 
+    def test_non_list_findings_are_tolerated(self):
+        scans = [
+            {
+                "id": "bad-int",
+                "workspace": "ws1",
+                "findings": 5,
+                "stats": {},
+            },
+            {
+                "id": "bad-bool",
+                "workspace": "ws1",
+                "findings": True,
+                "stats": {},
+            },
+            {
+                "id": "bad-float",
+                "workspace": "ws1",
+                "findings": 5.0,
+                "stats": {},
+            },
+            {
+                "id": "bad-str",
+                "workspace": "ws1",
+                "findings": "nonsense",
+                "stats": {},
+            },
+        ]
+        document = trend.build_trend(FakeStore(scans), "ws1")
+        self.assertEqual(len(document["scans"]), 4)
+        for entry in document["scans"]:
+            self.assertEqual(entry["total_findings"], 0)
+            self.assertEqual(entry["open_findings"], 0)
+            self.assertEqual(entry["high_open"], 0)
+            self.assertEqual(entry["by_severity"], {"high": 0, "medium": 0, "low": 0})
+
     def test_delta_high_positive_and_negative(self):
         self._scan("ws1", [_finding("a", "high")], name="start")
         self._scan("ws1", [_finding("b", "high"), _finding("c", "high")], name="worse")

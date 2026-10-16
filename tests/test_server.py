@@ -1013,6 +1013,18 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(len(payload["scans"]), MAX_LIMIT)
         self.assertEqual(payload["summary"]["scans"], MAX_LIMIT)
 
+    def test_workspace_trend_tolerates_non_list_findings(self):
+        ws = "wsTrendBadFindings"
+        scan = self._trend_scan(ws, [], name="bad")
+        scan["findings"] = 5
+        self.server.store._scans[scan["id"]] = scan
+        status, payload = self._json("GET", "/api/workspaces/%s/trend" % ws)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload["scans"]), 1)
+        self.assertEqual(payload["scans"][0]["total_findings"], 0)
+        self.assertEqual(payload["scans"][0]["open_findings"], 0)
+        self.assertEqual(payload["summary"]["scans"], 1)
+
     def _high_severity_scan(self, name="PR scan"):
         body = {
             "name": name,
