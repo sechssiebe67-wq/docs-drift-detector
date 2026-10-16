@@ -20,11 +20,16 @@ from urllib.parse import urlparse
 from . import analyze
 
 _WORKSPACE_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_GITHUB_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_GITHUB_TOKEN_ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_BASE_BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,200}$")
 
 MAX_RULE_HISTORY = 20
 MAX_WEBHOOK_URL = 500
 MIN_SCHEDULE_HOURS = 1
 MAX_SCHEDULE_HOURS = 168
+DEFAULT_GITHUB_BASE_BRANCH = "main"
+DEFAULT_GITHUB_TOKEN_ENV = "GITHUB_TOKEN"
 _RULE_HISTORY_ACTIONS = ("set", "import", "clear", "promote")
 
 
