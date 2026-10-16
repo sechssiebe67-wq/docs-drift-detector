@@ -10,7 +10,10 @@ checkable list of the documentation sections that most likely need an update.
 
 It is intentionally a *release-to-docs* tool. It is not a feedback inbox and it
 does not require customer tickets to work; it derives documentation work directly
-from what shipped.
+from what shipped. The goal has not changed: the drift trend views (per-workspace,
+cross-workspace, time-bucketed and their CSV exports) are a **read-only reporting
+layer on top of** the release-to-docs core — they summarise already-stored scans
+for reporting and never alter findings, the store or the release-to-docs flow.
 
 ## Intended users
 
@@ -257,6 +260,29 @@ manual review marathon.
   dependency-free helper (`docs_drift_detector/pagination.py`), and the
   endpoints stay strictly read-only with the same malformed-scan skipping as
   before.
+- **CSV export of the time-bucketed drift trend.** The two time-bucketed
+  endpoints can be downloaded as a dependency-free CSV instead of JSON through
+  `GET /api/workspaces/{ws}/trend/buckets.csv` and
+  `GET /api/trend/buckets.csv`, so a documentation lead can paste the weekly
+  numbers straight into a spreadsheet or attach them to a release review. Both
+  accept the same optional query parameters as their JSON siblings (`bucket`,
+  `limit`, `from`/`to`, `cursor`) and stream `text/csv` with a
+  `Content-Disposition: attachment` filename. Every row carries the shared
+  columns `key`, `start`, `end`, `scans`, `total_findings`,
+  `by_severity_high`, `by_severity_medium`, `by_severity_low`, `open_findings`,
+  `high_open` and `suppressed`; the cross-workspace variant adds a `workspace`
+  column and emits one row per bucket per workspace (a bucket with no workspace
+  breakdown still emits one row with an empty `workspace`). Rows follow the JSON
+  `buckets` (and per-bucket `workspaces`) order exactly, oldest-first, values
+  are RFC 4180 quoted only when they contain `,`, `"` or a newline, and the
+  export reuses `docs_drift_detector.buckets.build_workspace_buckets` /
+  `build_rollup_buckets` output rather than recomputing anything. A malformed
+  `bucket`/`limit`/`from`/`to`/`cursor` returns HTTP 400 with the same JSON
+  error body as the JSON siblings and a well-formed but unknown workspace
+  returns HTTP 200 with a header-only CSV. Both endpoints are strictly read-only
+  (never mutate the store, dispatch a webhook, open a pull request or record a
+  digest), and the CSV rendering lives in the standard-library-only
+  `docs_drift_detector/csv_export.py` (`to_csv(document, kind)`).
 - **Per-workspace scan retention.** A workspace can cap how many stored scans it
   keeps (`GET`/`PUT`/`DELETE /api/workspaces/{ws}/retention`, with
   `max_scans` in `0..10000`; `0` clears the policy and an unset workspace
@@ -294,11 +320,15 @@ release-to-docs comparison with text and screenshot matching.
   `GET /api/trend/buckets`) now closes the time-based-bucketing gap so periods
   can be compared week over week. An explicit inclusive **`from`/`to` window**
   and a stable **`cursor`/`next_cursor` pagination** now ship on all four trend
-  endpoints, so a release window can be filtered *and* paged further back. The
-  remaining trend gaps are time-zone-aware bucketing (buckets are always UTC),
-  a `month` (or larger) bucket and per-severity filtering rather than pagination
-  or date-range filtering; broader connector coverage and making repositories
-  first-class per-workspace objects remain as well.
+  endpoints, so a release window can be filtered *and* paged further back, and
+  the **CSV export** of the two time-bucketed endpoints
+  (`GET /api/workspaces/{ws}/trend/buckets.csv`,
+  `GET /api/trend/buckets.csv`) now turns that trend into a spreadsheet-ready
+  attachment. The remaining trend gaps are time-zone-aware bucketing (buckets
+  are always UTC), a `month` (or larger) bucket, per-severity filtering and a
+  JSON/CSV export of the *scan-order* trend (only the two bucketed endpoints
+  export today); broader connector coverage and making repositories first-class
+  per-workspace objects remain as well.
 - Screenshot diffing with per-region highlighting instead of change signals.
 - Pluggable connectors for GitHub commit ranges and rendered docs sites.
 - Per-workspace repositories and doc-page quotas for the tiered SaaS plan.
@@ -363,7 +393,10 @@ release-to-docs comparison with text and screenshot matching.
   record a digest. Their `bucket`/`limit` bounds, `from`/`to` window and optional
   `cursor` above are the only inputs, and an unsupported `bucket` value, a
   non-integer `limit`, a malformed `from`/`to` or a malformed `cursor` is
-  rejected with HTTP 400 rather than silently defaulted.
+  rejected with HTTP 400 rather than silently defaulted. Their CSV siblings
+  (`.../trend/buckets.csv`) share every one of these limits exactly, differing
+  only in the response media type; only the two time-bucketed endpoints have a
+  CSV form, so the scan-order trend and roll-up are still JSON-only.
 
 ## Revenue hypothesis
 

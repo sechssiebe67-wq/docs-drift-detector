@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import (
     analyze,
     buckets,
+    csv_export,
     export,
     github,
     pagination,
@@ -100,6 +101,21 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, status: int, payload: Dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self._send(status, body, "application/json; charset=utf-8")
+
+    def _csv(self, filename: str, text: str) -> None:
+        """Stream a UTF-8 CSV attachment with the given download filename."""
+        body = text.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/csv; charset=utf-8")
+        self.send_header(
+            "Content-Disposition", 'attachment; filename="%s"' % filename
+        )
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     def _error(self, status: int, message: str) -> None:
         self._json(status, {"error": message})
@@ -313,6 +329,38 @@ class Handler(BaseHTTPRequestHandler):
             except pagination.CursorError:
                 return self._error(400, "invalid cursor")
             return self._json(200, document)
+        if (
+            len(parts) == 5
+            and parts[:2] == ["api", "workspaces"]
+            and parts[3] == "trend"
+            and parts[4] == "buckets.csv"
+        ):
+            if not _valid_id(parts[2]):
+                return self._error(400, "invalid workspace id")
+            bucket, limit = self._bucket_options()
+            if bucket is None or limit is None:
+                return self._error(400, "invalid bucket or limit")
+            window = self._window_options()
+            if window is None:
+                return self._error(400, "invalid from or to")
+            start, end = window
+            scans = self.server.store.list_workspace_scans(parts[2])
+            try:
+                document = buckets.build_workspace_buckets(
+                    scans,
+                    parts[2],
+                    bucket=bucket,
+                    limit=limit,
+                    from_time=start,
+                    to_time=end,
+                    cursor=self._cursor_option(),
+                )
+            except pagination.CursorError:
+                return self._error(400, "invalid cursor")
+            return self._csv(
+                "docs-drift-%s-trend-buckets.csv" % parts[2],
+                csv_export.to_csv(document, "workspace"),
+            )
         if parts == ["api", "schedule", "status"]:
             return self._schedule_status()
         if (
@@ -350,6 +398,30 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, "invalid workspace id")
             history = self.server.store.list_workspace_rule_history(parts[2])
             return self._json(200, {"workspace": parts[2], "history": history})
+        if parts == ["api", "trend", "buckets.csv"]:
+            bucket, limit = self._bucket_options()
+            if bucket is None or limit is None:
+                return self._error(400, "invalid bucket or limit")
+            window = self._window_options()
+            if window is None:
+                return self._error(400, "invalid from or to")
+            start, end = window
+            scans = self.server.store.list_all_scans()
+            try:
+                document = buckets.build_rollup_buckets(
+                    scans,
+                    bucket=bucket,
+                    limit=limit,
+                    from_time=start,
+                    to_time=end,
+                    cursor=self._cursor_option(),
+                )
+            except pagination.CursorError:
+                return self._error(400, "invalid cursor")
+            return self._csv(
+                "docs-drift-trend-buckets.csv",
+                csv_export.to_csv(document, "rollup"),
+            )
         if parts == ["api", "trend", "buckets"]:
             bucket, limit = self._bucket_options()
             if bucket is None or limit is None:
