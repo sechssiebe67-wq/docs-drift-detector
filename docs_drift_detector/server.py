@@ -16,6 +16,7 @@ from . import (
     buckets,
     csv_export,
     dashboard,
+    digest_export,
     export,
     github,
     pagination,
@@ -288,6 +289,37 @@ class Handler(BaseHTTPRequestHandler):
                 limit = MAX_DIGEST_HISTORY
             digests = self.server.store.list_workspace_digests(parts[2], limit)
             return self._json(200, {"workspace": parts[2], "digests": digests})
+        if (
+            len(parts) == 4
+            and parts[:2] == ["api", "workspaces"]
+            and parts[3] in ("digests.csv", "digests.jsonl")
+        ):
+            if not _valid_id(parts[2]):
+                return self._error(400, "invalid workspace id")
+            query = urllib.parse.parse_qs(
+                urllib.parse.urlparse(self.path).query, keep_blank_values=True
+            )
+            limit = 10
+            if "limit" in query:
+                try:
+                    limit = int(query["limit"][0])
+                except (TypeError, ValueError):
+                    limit = 10
+            if limit < 1:
+                limit = 1
+            elif limit > MAX_DIGEST_HISTORY:
+                limit = MAX_DIGEST_HISTORY
+            digests = self.server.store.list_workspace_digests(parts[2], limit)
+            document = {"workspace": parts[2], "digests": digests}
+            if parts[3] == "digests.csv":
+                return self._csv(
+                    "docs-drift-%s-digests.csv" % parts[2],
+                    digest_export.to_csv(document),
+                )
+            return self._jsonl(
+                "docs-drift-%s-digests.jsonl" % parts[2],
+                digest_export.to_jsonl(document),
+            )
         if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "dashboard":
             if not _valid_id(parts[2]):
                 return self._error(400, "invalid workspace id")

@@ -168,6 +168,29 @@ manual review marathon.
   erroring webhook still records the digest attempt with `delivery_ok: false`
   (and a non-empty `delivery_error`) and never changes the stored scan or stops
   the scheduler.
+- **CSV/JSONL export of the per-workspace digest history.** The digest history
+  can be downloaded as a dependency-free CSV or newline-delimited JSON instead
+  of JSON through `GET /api/workspaces/{ws}/digests.csv` and
+  `GET /api/workspaces/{ws}/digests.jsonl`, so a documentation lead can attach
+  what the scheduler POSTed to a release review or load it into a spreadsheet or
+  warehouse. Both accept the same optional integer `limit` as the JSON sibling
+  (default `10`, clamped to `1..20`; an invalid value falls back to the default
+  rather than erroring) and stream `text/csv; charset=utf-8` /
+  `application/x-ndjson; charset=utf-8` with a `Content-Disposition: attachment`
+  filename. Every row/line covers `created_at`, `scan_id`, `total_findings`,
+  `by_severity_high`/`by_severity_medium`/`by_severity_low` (CSV) or the nested
+  `by_severity` (JSONL), `new_high_count`, `delivery_ok`, `delivery_error` and
+  `attempts`, ordered **newest-first** to match `GET /api/workspaces/{ws}/digests`.
+  Values are RFC 4180 quoted only when they contain `,`, `"` or a newline and
+  JSONL lines are `json.dumps(..., ensure_ascii=False, sort_keys=True)` with a
+  trailing newline after the last line. An invalid workspace id returns HTTP 400
+  and a well-formed but unknown (or empty) workspace returns HTTP 200 with a
+  header-only CSV or an empty JSONL body; a non-dict entry is skipped rather than
+  raising. Both endpoints are strictly read-only (never mutate the store,
+  dispatch a webhook, open a pull request or record a digest) and reuse the JSON
+  endpoint's `store.list_workspace_digests` output, so the tabular output can
+  never diverge from the JSON. The rendering lives in the standard-library-only
+  `docs_drift_detector/digest_export.py`.
 - **Bounded webhook/digest delivery retries.** Outbound delivery is no longer a
   single best-effort POST. `notify.dispatch_with_retry` retries a failed POST a
   small, fixed number of times with exponential backoff before giving up: it
@@ -397,7 +420,12 @@ release-to-docs comparison with text and screenshot matching.
   attachment. The matching **JSONL export**
   (`GET /api/workspaces/{ws}/trend/buckets.jsonl`,
   `GET /api/trend/buckets.jsonl`) now streams the same time-bucketed documents
-  one JSON object per line for a warehouse/log/notebook pipeline. The remaining
+  one JSON object per line for a warehouse/log/notebook pipeline. The
+  per-workspace **digest history** now has the matching
+  **CSV/JSONL exports** (`GET /api/workspaces/{ws}/digests.csv`,
+  `GET /api/workspaces/{ws}/digests.jsonl`), so what the scheduler POSTed can be
+  attached to a release review or loaded into a warehouse without reshaping JSON
+  by hand. The remaining
   trend gaps are time-zone-aware bucketing (buckets are always UTC), a `month`
   (or larger) bucket, per-severity filtering and a JSON/CSV/JSONL export of the
   *scan-order* trend (only the two bucketed endpoints export today); broader
