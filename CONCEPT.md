@@ -215,6 +215,27 @@ manual review marathon.
   endpoints are strictly read-only (never mutate the store, dispatch a webhook,
   open a pull request or record a digest) and a well-formed but unknown workspace
   returns HTTP 200 with empty `buckets`.
+- **Date-range filtering on the drift trend.** All four read-only trend
+  endpoints (`GET /api/workspaces/{ws}/trend`,
+  `GET /api/workspaces/{ws}/trend/buckets`, `GET /api/trend`,
+  `GET /api/trend/buckets`) accept optional `from` and `to` query parameters
+  that filter stored scans by `created_at` *before* aggregation, so a
+  documentation lead can ask "how bad was drift during the 4.2 release window?"
+  instead of only the most recent N scans or buckets. Each bound is optional and
+  independent: `from` alone leaves the end unbounded, `to` alone leaves the start
+  unbounded, and neither reproduces the previous response byte-for-byte. A plain
+  date (`2026-01-05`) is interpreted as `00:00:00+00:00`; a full ISO-8601
+  timestamp (`2026-01-05T12:00:00+00:00`, or a `Z` suffix) keeps its offset and
+  a naive timestamp is treated as UTC. The window is inclusive `[from, to]`, so
+  out-of-window scans disappear from `scans`, `buckets`, `workspaces` and every
+  `summary` field (including `delta_high`); `limit` is applied *after* filtering
+  and `bucket` still accepts only `day`/`week`. A malformed value such as
+  `from=not-a-date` returns HTTP 400 on all four endpoints, a blank bound is
+  treated as absent, and a window containing no scans returns HTTP 200 with empty
+  `scans`/`buckets` and a zeroed `summary` rather than an error. Parsing lives in
+  a shared, dependency-free helper (`docs_drift_detector/timewindow.py`), and the
+  endpoints stay strictly read-only with the same malformed-scan skipping as
+  before.
 - **Per-workspace scan retention.** A workspace can cap how many stored scans it
   keeps (`GET`/`PUT`/`DELETE /api/workspaces/{ws}/retention`, with
   `max_scans` in `0..10000`; `0` clears the policy and an unset workspace
@@ -250,10 +271,11 @@ release-to-docs comparison with text and screenshot matching.
   **drift roll-up** now closes the portfolio gap (`GET /api/trend`), and the
   **time-bucketed trend** (`GET /api/workspaces/{ws}/trend/buckets`,
   `GET /api/trend/buckets`) now closes the time-based-bucketing gap so periods
-  can be compared week over week. What remains for the trend surface is
-  date-range filtering (an explicit `from`/`to` window) and pagination of older
-  buckets; broader connector coverage and making repositories first-class
-  per-workspace objects remain as well.
+  can be compared week over week. An explicit inclusive **`from`/`to` window**
+  now ships on all four trend endpoints, so the remaining trend gap is
+  pagination of older buckets and scans rather than date-range filtering;
+  broader connector coverage and making repositories first-class per-workspace
+  objects remain as well.
 - Screenshot diffing with per-region highlighting instead of change signals.
 - Pluggable connectors for GitHub commit ranges and rendered docs sites.
 - Per-workspace repositories and doc-page quotas for the tiered SaaS plan.
@@ -293,26 +315,30 @@ release-to-docs comparison with text and screenshot matching.
 - The drift trend is bounded (`limit` clamped to `1..50`, default `10`) and
   keyed by workspace only: it reads the single JSON store, presents scans in
   scan order rather than time buckets, has no pagination, and offers no
-  cross-workspace or global trend. The time-bucketed variant
-  (`GET /api/workspaces/{ws}/trend/buckets`) closes the scan-order gap but is
-  itself bounded (`limit` buckets clamped to `1..50`, default `10`, `bucket` is
-  `day` or `week` only) and workspace-keyed: it has no explicit date-range
-  filter, no `month` (or larger) bucket, no pagination beyond `limit`, and no
-  time-zone parameter (buckets are always UTC).
+  cross-workspace or global trend. It does accept the shared inclusive
+  `from`/`to` `created_at` window (see *Date-range filtering* above). The
+  time-bucketed variant (`GET /api/workspaces/{ws}/trend/buckets`) closes the
+  scan-order gap but is itself bounded (`limit` buckets clamped to `1..50`,
+  default `10`, `bucket` is `day` or `week` only) and workspace-keyed: it has no
+  `month` (or larger) bucket, no pagination beyond `limit`, and no time-zone
+  parameter (buckets are always UTC), though it shares the same `from`/`to`
+  date-range filter.
 - The cross-workspace drift roll-up (`GET /api/trend`) is bounded (`limit`
   clamped to `1..50`, default `10`) and keyed by workspace: it reads the single
   JSON store, presents one chronological window in scan order rather than time
-  buckets, has no pagination, date-range or per-severity filtering, and the
-  `workspaces` aggregate grows with the number of distinct workspaces in the
-  window (scans without a workspace appear under the empty-string bucket). Its
-  time-bucketed companion (`GET /api/trend/buckets`) shares those limits
-  (`day`/`week` only, `limit` buckets clamped to `1..50`, UTC only, no date-range
-  filter or pagination) and likewise has no per-severity filtering.
+  buckets, has no pagination or per-severity filtering, and the `workspaces`
+  aggregate grows with the number of distinct workspaces in the window (scans
+  without a workspace appear under the empty-string bucket). It shares the
+  inclusive `from`/`to` date-range filter. Its time-bucketed companion
+  (`GET /api/trend/buckets`) shares those limits (`day`/`week` only, `limit`
+  buckets clamped to `1..50`, UTC only, same `from`/`to` filter, no pagination)
+  and likewise has no per-severity filtering.
 - Both time-bucketed trend endpoints are strictly read-only: they read the single
   JSON store and never mutate it, dispatch a webhook, open a pull request or
-  record a digest. Their `bucket`/`limit` bounds above are the only inputs, and
-  an unsupported `bucket` value or non-integer `limit` is rejected with HTTP 400
-  rather than silently defaulted.
+  record a digest. Their `bucket`/`limit` bounds and `from`/`to` window above are
+  the only inputs, and an unsupported `bucket` value, a non-integer `limit` or a
+  malformed `from`/`to` is rejected with HTTP 400 rather than silently
+  defaulted.
 
 ## Revenue hypothesis
 

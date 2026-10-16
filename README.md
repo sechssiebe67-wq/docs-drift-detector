@@ -50,10 +50,10 @@ Open <http://localhost:8080>. The service exposes:
 - `DELETE /api/workspaces/{ws}/retention` — clear the retention policy.
 - `GET  /api/schedule/status` — scheduler status (`enabled`, `tick_seconds`, `due`, `schedules`).
 - `GET  /api/workspaces/{ws}/digests` — recent scheduled-scan digests for a workspace, newest first (`limit` optional, default `10`).
-- `GET  /api/workspaces/{ws}/trend` — chronological drift trend across a workspace's recent scans (`limit` optional, default `10`, max `50`).
-- `GET  /api/workspaces/{ws}/trend/buckets` — time-bucketed drift trend (`bucket` optional `day`|`week`, default `week`; `limit` optional, default `10`, max `50`).
-- `GET  /api/trend` — cross-workspace drift roll-up across the recent scans of all workspaces (`limit` optional, default `10`, max `50`).
-- `GET  /api/trend/buckets` — cross-workspace time-bucketed drift roll-up (`bucket` optional `day`|`week`, default `week`; `limit` optional, default `10`, max `50`).
+- `GET  /api/workspaces/{ws}/trend` — chronological drift trend across a workspace's recent scans (`limit` optional, default `10`, max `50`; `from`/`to` optional inclusive window).
+- `GET  /api/workspaces/{ws}/trend/buckets` — time-bucketed drift trend (`bucket` optional `day`|`week`, default `week`; `limit` optional, default `10`, max `50`; `from`/`to` optional inclusive window).
+- `GET  /api/trend` — cross-workspace drift roll-up across the recent scans of all workspaces (`limit` optional, default `10`, max `50`; `from`/`to` optional inclusive window).
+- `GET  /api/trend/buckets` — cross-workspace time-bucketed drift roll-up (`bucket` optional `day`|`week`, default `week`; `limit` optional, default `10`, max `50`; `from`/`to` optional inclusive window).
 
 ### Scan request body
 
@@ -524,6 +524,9 @@ curl -sS 'localhost:8080/api/workspaces/ws1/trend?limit=5' | python3 -m json.too
   window. The other summary fields aggregate the window.
 - The optional `limit` query parameter is an integer (default `10`) clamped into
   `1..50`; a non-integer such as `limit=abc` returns HTTP 400.
+- The optional `from`/`to` query parameters restrict the window to scans whose
+  `created_at` falls inside the inclusive UTC range; see
+  [Date-range filtering](#date-range-filtering-trend-endpoints) below.
 - An invalid workspace id (for example `bad id!`) returns HTTP 400. A
   well-formed but unknown workspace returns HTTP 200 with an empty `scans` list
   and a zeroed `summary`.
@@ -629,8 +632,9 @@ curl -sS 'localhost:8080/api/trend?limit=5' | python3 -m json.tool
   store the response is HTTP 200 with empty `scans` and `workspaces` and a
   zeroed `summary`.
 - The roll-up is bounded and keyed by workspace only: one chronological window
-  in scan order rather than time buckets, with no pagination or date-range
-  filtering. The scans live in the single JSON store.
+  in scan order rather than time buckets, with no pagination. The optional
+  `from`/`to` window described below applies here too. The scans live in the
+  single JSON store.
 
 ### Time-bucketed drift trend
 
@@ -793,8 +797,42 @@ curl -sS 'localhost:8080/api/trend/buckets?bucket=day' | python3 -m json.tool
   per-workspace route; on an empty store the response is HTTP 200 with empty
   `buckets`/`workspaces` and a zeroed `summary`.
 - Both routes are bounded (`bucket` is `day`/`week` only and `limit` buckets are
-  clamped to `1..50`, default `10`), UTC-only, and have no date-range filter or
-  pagination.
+  clamped to `1..50`, default `10`), UTC-only, and have no pagination beyond
+  `limit`. The optional inclusive `from`/`to` window described below applies to
+  both.
+
+### Date-range filtering (trend endpoints)
+
+All four read-only trend endpoints — `GET /api/workspaces/{ws}/trend`,
+`GET /api/workspaces/{ws}/trend/buckets`, `GET /api/trend` and
+`GET /api/trend/buckets` — accept optional `from` and `to` query parameters to
+answer questions such as "how bad was drift during the 4.2 release window?".
+Scans whose `created_at` falls outside the inclusive `[from, to]` UTC window are
+excluded from `scans`, `buckets`, `workspaces` and every `summary` field alike,
+and `limit` is applied after filtering.
+
+```sh
+curl -sS 'localhost:8080/api/workspaces/ws1/trend?from=2026-01-01&to=2026-01-31' \
+  | python3 -m json.tool
+
+# open-ended: everything from 2026-01-05 onwards, cross-workspace, bucketed by day
+curl -sS 'localhost:8080/api/trend/buckets?bucket=day&from=2026-01-05' \
+  | python3 -m json.tool
+```
+
+- Each bound is optional and independent: supplying only `from` leaves `to`
+  unbounded, supplying only `to` leaves `from` unbounded, and supplying neither
+  reproduces the unfiltered response byte-for-byte.
+- A plain date (`from=2026-01-05`) is interpreted as `2026-01-05T00:00:00+00:00`.
+  A full ISO-8601 timestamp (`from=2026-01-05T12:00:00+00:00` or a `Z` suffix) is
+  accepted and keeps its offset; a naive timestamp is treated as UTC. Remember
+  to URL-encode a literal `+` as `%2B`.
+- The window is inclusive on both ends, so a scan exactly at `from` or `to` is
+  kept. A malformed value such as `from=not-a-date` returns HTTP 400 on all four
+  endpoints; a blank value (`from=`) is treated as absent.
+- A window that excludes every scan is not an error: the endpoint returns HTTP
+  200 with empty `scans`/`buckets` and a zeroed `summary`, and `delta_high` is
+  `0` whenever fewer than two scans (or buckets) remain.
 
 ### Pull-request suggestion
 
