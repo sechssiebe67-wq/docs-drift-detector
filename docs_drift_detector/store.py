@@ -25,6 +25,7 @@ _GITHUB_TOKEN_ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _BASE_BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,200}$")
 
 MAX_RULE_HISTORY = 20
+MAX_DIGEST_HISTORY = 20
 MAX_WEBHOOK_URL = 500
 MIN_SCHEDULE_HOURS = 1
 MAX_SCHEDULE_HOURS = 168
@@ -199,6 +200,56 @@ def _normalise_history_entry(entry: Any) -> Optional[Dict[str, Any]]:
     }
 
 
+def _normalise_digest_entry(entry: Any) -> Optional[Dict[str, Any]]:
+    """Validate a persisted digest-history entry, or return None when malformed.
+
+    Missing or malformed scalar fields are replaced with safe defaults so a
+    partially written store never discards the whole history. A non-dict entry
+    is discarded outright.
+    """
+    if not isinstance(entry, dict):
+        return None
+    created_at = entry.get("created_at")
+    if not isinstance(created_at, str):
+        created_at = ""
+    scan_id = entry.get("scan_id")
+    if not isinstance(scan_id, str):
+        scan_id = ""
+    total_findings = entry.get("total_findings")
+    if (
+        isinstance(total_findings, bool)
+        or not isinstance(total_findings, int)
+        or total_findings < 0
+    ):
+        total_findings = 0
+    by_severity = {"high": 0, "medium": 0, "low": 0}
+    raw_severity = entry.get("by_severity")
+    if isinstance(raw_severity, dict):
+        for key in by_severity:
+            value = raw_severity.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                by_severity[key] = value
+    new_high_count = entry.get("new_high_count")
+    if (
+        isinstance(new_high_count, bool)
+        or not isinstance(new_high_count, int)
+        or new_high_count < 0
+    ):
+        new_high_count = 0
+    delivery_error = entry.get("delivery_error")
+    if not isinstance(delivery_error, str):
+        delivery_error = ""
+    return {
+        "created_at": created_at,
+        "scan_id": scan_id,
+        "total_findings": total_findings,
+        "by_severity": by_severity,
+        "new_high_count": new_high_count,
+        "delivery_ok": bool(entry.get("delivery_ok", False)),
+        "delivery_error": delivery_error,
+    }
+
+
 class Store:
     def __init__(self, path: str):
         self.path = path
@@ -210,6 +261,7 @@ class Store:
         self._workspace_schedules: Dict[str, Dict[str, Any]] = {}
         self._workspace_github: Dict[str, Dict[str, str]] = {}
         self._workspace_retention: Dict[str, int] = {}
+        self._workspace_digests: Dict[str, List[Dict[str, Any]]] = {}
         self._load()
 
     def _load(self) -> None:
@@ -301,6 +353,23 @@ class Store:
                 if normalised_limit is not None:
                     loaded_retention[workspace] = normalised_limit
             self._workspace_retention = loaded_retention
+        digests = data.get("workspace_digests")
+        if isinstance(digests, dict):
+            loaded_digests: Dict[str, List[Dict[str, Any]]] = {}
+            for workspace, entries in digests.items():
+                if not isinstance(workspace, str) or not _valid_workspace(workspace):
+                    continue
+                if not isinstance(entries, list):
+                    continue
+                normalised_entries = []
+                for entry in entries:
+                    normalised_entry = _normalise_digest_entry(entry)
+                    if normalised_entry is not None:
+                        normalised_entries.append(normalised_entry)
+                if len(normalised_entries) > MAX_DIGEST_HISTORY:
+                    normalised_entries = normalised_entries[-MAX_DIGEST_HISTORY:]
+                loaded_digests[workspace] = normalised_entries
+            self._workspace_digests = loaded_digests
 
     def _persist(self) -> None:
         directory = os.path.dirname(os.path.abspath(self.path))
@@ -317,6 +386,7 @@ class Store:
                         "workspace_schedules": self._workspace_schedules,
                         "workspace_github": self._workspace_github,
                         "workspace_retention": self._workspace_retention,
+                        "workspace_digests": self._workspace_digests,
                     },
                     handle,
                     ensure_ascii=False,
@@ -548,6 +618,74 @@ class Store:
             configs = [copy.deepcopy(config) for config in self._workspace_schedules.values()]
         configs.sort(key=lambda config: config.get("workspace", ""))
         return configs
+
+    def record_workspace_digest(
+        self, workspace: str, digest: Any, delivery: Any
+    ) -> Dict[str, Any]:
+        """Append a scheduled-scan digest to the workspace's bounded history.
+
+        ``digest`` is the payload built by :func:`notify.build_digest` and
+        ``delivery`` is the result of the webhook dispatch (or a synthetic
+        failure when no webhook is configured). The stored entry keeps the
+        audit-relevant summary: ``created_at``, ``scan_id``, ``total_findings``,
+        ``by_severity``, ``new_high_count``, ``delivery_ok`` and
+        ``delivery_error``. History is capped at :data:`MAX_DIGEST_HISTORY`
+        entries per workspace, dropping the oldest first.
+        """
+        name = self._check_workspace(workspace)
+        digest = digest if isinstance(digest, dict) else {}
+        delivery = delivery if isinstance(delivery, dict) else {}
+        raw_severity = digest.get("by_severity")
+        by_severity = {"high": 0, "medium": 0, "low": 0}
+        if isinstance(raw_severity, dict):
+            for key in by_severity:
+                value = raw_severity.get(key)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    by_severity[key] = value
+        total_findings = digest.get("total_findings")
+        if (
+            isinstance(total_findings, bool)
+            or not isinstance(total_findings, int)
+            or total_findings < 0
+        ):
+            total_findings = 0
+        new_high = digest.get("new_high")
+        new_high_count = len(new_high) if isinstance(new_high, list) else 0
+        delivery_error = delivery.get("error")
+        if not isinstance(delivery_error, str):
+            delivery_error = ""
+        entry = {
+            "created_at": _utc_now(),
+            "scan_id": str(digest.get("scan_id") or ""),
+            "total_findings": total_findings,
+            "by_severity": by_severity,
+            "new_high_count": new_high_count,
+            "delivery_ok": bool(delivery.get("ok")),
+            "delivery_error": delivery_error,
+        }
+        with self._lock:
+            entries = self._workspace_digests.setdefault(name, [])
+            entries.append(entry)
+            if len(entries) > MAX_DIGEST_HISTORY:
+                del entries[: len(entries) - MAX_DIGEST_HISTORY]
+            self._persist()
+            return copy.deepcopy(entry)
+
+    def list_workspace_digests(
+        self, workspace: str, limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        """Return the workspace's digest history, newest-first.
+
+        ``limit`` bounds the number of returned entries; a non-positive or
+        non-integer value returns the full (already bounded) history.
+        """
+        name = self._check_workspace(workspace)
+        with self._lock:
+            entries = self._workspace_digests.get(name, [])
+            newest_first = list(reversed(entries))
+            if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0:
+                newest_first = newest_first[:limit]
+            return copy.deepcopy(newest_first)
 
     def list_due_schedules(self, now: Any) -> List[Dict[str, Any]]:
         """Return enabled schedules whose ``next_run_at`` is at or before ``now``."""

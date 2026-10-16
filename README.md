@@ -49,6 +49,7 @@ Open <http://localhost:8080>. The service exposes:
 - `PUT  /api/workspaces/{ws}/retention` — set the limit with `{"max_scans": 0..10000}`; `0` clears the policy.
 - `DELETE /api/workspaces/{ws}/retention` — clear the retention policy.
 - `GET  /api/schedule/status` — scheduler status (`enabled`, `tick_seconds`, `due`, `schedules`).
+- `GET  /api/workspaces/{ws}/digests` — recent scheduled-scan digests for a workspace, newest first (`limit` optional, default `10`).
 
 ### Scan request body
 
@@ -378,6 +379,50 @@ scheduler or the other due schedules.
   "schedules": [{"workspace": "ws1", "interval_hours": 24, "enabled": true, "scan": {}, "next_run_at": "2026-01-01T00:00:00+00:00"}]
 }
 ```
+
+#### Digest history
+
+So a missed or noisy digest can be audited after the fact instead of only being
+visible in the webhook receiver's logs, the scheduler records every digest it
+builds in the same JSON store as scans:
+
+```sh
+curl -sS 'localhost:8080/api/workspaces/ws1/digests?limit=5' | python3 -m json.tool
+```
+
+`GET /api/workspaces/{ws}/digests` returns HTTP 200 with:
+
+```json
+{
+  "workspace": "ws1",
+  "digests": [
+    {
+      "created_at": "2026-01-01T12:00:00+00:00",
+      "scan_id": "a1b2c3d4e5f6",
+      "total_findings": 3,
+      "by_severity": {"high": 1, "medium": 1, "low": 1},
+      "new_high_count": 1,
+      "delivery_ok": true,
+      "delivery_error": ""
+    }
+  ]
+}
+```
+
+- Entries are ordered **newest-first** and capped at `MAX_DIGEST_HISTORY = 20`
+  per workspace (the oldest is dropped). The history is stored under
+  `workspace_digests` in the single JSON file, keyed by workspace only, with no
+  pagination and no time-based expiry.
+- The optional `limit` query parameter is an integer; values outside `1..20` are
+  clamped and a non-integer (for example `limit=abc`) returns HTTP 400. The
+  default is `10`.
+- Recording is best-effort: every due scheduled scan appends exactly one entry.
+  A missing, failing or erroring webhook still records the attempt with
+  `delivery_ok: false` and a non-empty `delivery_error`, and neither changes the
+  stored scan nor stops the scheduler.
+- An invalid workspace id (for example `bad id!`) returns HTTP 400. A
+  well-formed but unknown workspace returns HTTP 200 with an empty `digests`
+  list.
 
 The scheduler is started by `python -m docs_drift_detector` as a daemon thread
 and shut down cleanly on `SIGTERM`/`SIGINT`. It is **single-process, in-memory

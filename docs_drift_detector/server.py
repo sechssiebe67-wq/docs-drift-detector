@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import analyze, export, github, pullrequest, runner
 from .store import (
     DEFAULT_GITHUB_TOKEN_ENV,
+    MAX_DIGEST_HISTORY,
     MAX_RETENTION_SCANS,
     MAX_SCHEDULE_HOURS,
     MIN_SCHEDULE_HOURS,
@@ -165,6 +166,24 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, "invalid workspace id")
             limit = self.server.store.get_workspace_retention(parts[2])
             return self._json(200, {"workspace": parts[2], "max_scans": limit})
+        if len(parts) == 4 and parts[:2] == ["api", "workspaces"] and parts[3] == "digests":
+            if not _valid_id(parts[2]):
+                return self._error(400, "invalid workspace id")
+            query = urllib.parse.parse_qs(
+                urllib.parse.urlparse(self.path).query, keep_blank_values=True
+            )
+            limit = 10
+            if "limit" in query:
+                try:
+                    limit = int(query["limit"][0])
+                except (TypeError, ValueError):
+                    return self._error(400, "invalid limit")
+            if limit < 1:
+                limit = 1
+            elif limit > MAX_DIGEST_HISTORY:
+                limit = MAX_DIGEST_HISTORY
+            digests = self.server.store.list_workspace_digests(parts[2], limit)
+            return self._json(200, {"workspace": parts[2], "digests": digests})
         if parts == ["api", "schedule", "status"]:
             return self._schedule_status()
         if (

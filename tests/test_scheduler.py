@@ -1,7 +1,9 @@
+import io
 import os
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -131,6 +133,100 @@ class SchedulerTest(unittest.TestCase):
             notify.dispatch = original
 
         self.assertEqual(len(self.store.list_scans()), 1)
+
+    def test_run_once_records_digest_entry(self):
+        self._schedule("ws1")
+        self.store.set_workspace_webhook("ws1", "https://hooks.example.com/x")
+        original = notify.dispatch
+        notify.dispatch = lambda url, payload, timeout=5: {
+            "ok": True,
+            "status": 200,
+            "error": "",
+        }
+        try:
+            Scheduler(self.store).run_once(NOW)
+        finally:
+            notify.dispatch = original
+
+        history = self.store.list_workspace_digests("ws1")
+        self.assertEqual(len(history), 1)
+        entry = history[0]
+        self.assertTrue(entry["scan_id"])
+        self.assertEqual(entry["total_findings"], 1)
+        self.assertEqual(entry["by_severity"], {"high": 0, "medium": 1, "low": 0})
+        self.assertEqual(entry["new_high_count"], 0)
+        self.assertTrue(entry["delivery_ok"])
+        self.assertEqual(entry["delivery_error"], "")
+
+    def test_failing_webhook_records_digest_and_continues(self):
+        self._schedule("ws1")
+        self.store.set_workspace_webhook("ws1", "https://hooks.example.com/x")
+        original = notify.dispatch
+
+        def boom(url, payload, timeout=5):
+            raise RuntimeError("webhook exploded")
+
+        notify.dispatch = boom
+        try:
+            results = Scheduler(self.store).run_once(NOW)
+        finally:
+            notify.dispatch = original
+
+        self.assertEqual(len(self.store.list_scans()), 1)
+        self.assertFalse(results[0]["digest_sent"])
+        history = self.store.list_workspace_digests("ws1")
+        self.assertEqual(len(history), 1)
+        self.assertFalse(history[0]["delivery_ok"])
+        self.assertTrue(history[0]["delivery_error"])
+        self.assertEqual(
+            self.store.get_workspace_schedule("ws1")["next_run_at"],
+            "2020-01-01T01:00:00+00:00",
+        )
+
+    def test_non_2xx_webhook_records_delivery_error(self):
+        self._schedule("ws1")
+        self.store.set_workspace_webhook("ws1", "https://hooks.example.com/x")
+        original = notify.dispatch
+        notify.dispatch = lambda url, payload, timeout=5: {
+            "ok": False,
+            "status": 500,
+            "error": "HTTP 500",
+        }
+        try:
+            Scheduler(self.store).run_once(NOW)
+        finally:
+            notify.dispatch = original
+
+        entry = self.store.list_workspace_digests("ws1")[0]
+        self.assertFalse(entry["delivery_ok"])
+        self.assertEqual(entry["delivery_error"], "HTTP 500")
+
+    def test_due_schedule_without_webhook_records_attempt(self):
+        self._schedule("ws1")
+        Scheduler(self.store).run_once(NOW)
+        history = self.store.list_workspace_digests("ws1")
+        self.assertEqual(len(history), 1)
+        self.assertFalse(history[0]["delivery_ok"])
+        self.assertTrue(history[0]["delivery_error"])
+
+    def test_recording_failure_does_not_stop_loop(self):
+        self._schedule("ws1")
+
+        def boom(workspace, digest, delivery):
+            raise RuntimeError("store exploded")
+
+        self.store.record_workspace_digest = boom
+        captured = io.StringIO()
+        with redirect_stderr(captured):
+            results = Scheduler(self.store).run_once(NOW)
+
+        self.assertTrue(results[0]["ran"])
+        self.assertEqual(len(self.store.list_scans()), 1)
+        self.assertIn("failed to record digest", captured.getvalue())
+        self.assertEqual(
+            self.store.get_workspace_schedule("ws1")["next_run_at"],
+            "2020-01-01T01:00:00+00:00",
+        )
 
     def test_failing_scan_does_not_stop_other_schedules(self):
         self._schedule("wsFail")

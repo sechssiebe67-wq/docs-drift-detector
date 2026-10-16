@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from docs_drift_detector import github, notify  # noqa: E402
 from docs_drift_detector.server import create_server  # noqa: E402
-from docs_drift_detector.store import Store  # noqa: E402
+from docs_drift_detector.store import MAX_DIGEST_HISTORY, Store  # noqa: E402
 
 
 class ServerTest(unittest.TestCase):
@@ -804,6 +804,97 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(
             set(payload), {"enabled", "tick_seconds", "due", "schedules"}
         )
+
+    def _record_digest(self, ws, scan_id, total=1, high=0, ok=True, error=""):
+        self.server.store.record_workspace_digest(
+            ws,
+            {
+                "scan_id": scan_id,
+                "total_findings": total,
+                "by_severity": {"high": high, "medium": total - high, "low": 0},
+                "new_high": [{} for _ in range(high)],
+            },
+            {"ok": ok, "status": 200 if ok else 500, "error": error},
+        )
+
+    def test_workspace_digests_unknown_returns_empty(self):
+        status, payload = self._json("GET", "/api/workspaces/wsNeverDigests/digests")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {"workspace": "wsNeverDigests", "digests": []})
+
+    def test_workspace_digests_invalid_id_returns_400(self):
+        status, payload = self._json("GET", "/api/workspaces/bad%20id!/digests")
+        self.assertEqual(status, 400)
+        self.assertIn("error", payload)
+
+    def test_workspace_digests_returns_newest_first(self):
+        ws = "wsDigestList"
+        self._record_digest(ws, "d1")
+        self._record_digest(ws, "d2")
+        self._record_digest(ws, "d3", total=2, high=1)
+        status, payload = self._json("GET", "/api/workspaces/%s/digests" % ws)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["workspace"], ws)
+        self.assertEqual([e["scan_id"] for e in payload["digests"]], ["d3", "d2", "d1"])
+        entry = payload["digests"][0]
+        self.assertEqual(
+            set(entry),
+            {
+                "created_at",
+                "scan_id",
+                "total_findings",
+                "by_severity",
+                "new_high_count",
+                "delivery_ok",
+                "delivery_error",
+            },
+        )
+        self.assertEqual(set(entry["by_severity"]), {"high", "medium", "low"})
+        self.assertEqual(entry["new_high_count"], 1)
+        self.assertTrue(entry["delivery_ok"])
+
+    def test_workspace_digests_respects_limit(self):
+        ws = "wsDigestLimit"
+        for index in range(5):
+            self._record_digest(ws, "d%d" % index)
+        status, payload = self._json("GET", "/api/workspaces/%s/digests?limit=2" % ws)
+        self.assertEqual(status, 200)
+        self.assertEqual([e["scan_id"] for e in payload["digests"]], ["d4", "d3"])
+
+    def test_workspace_digests_default_limit_is_ten(self):
+        ws = "wsDigestDefault"
+        for index in range(12):
+            self._record_digest(ws, "d%02d" % index)
+        status, payload = self._json("GET", "/api/workspaces/%s/digests" % ws)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload["digests"]), 10)
+        self.assertEqual(payload["digests"][0]["scan_id"], "d11")
+
+    def test_workspace_digests_limit_is_clamped(self):
+        ws = "wsDigestClamp"
+        for index in range(3):
+            self._record_digest(ws, "d%d" % index)
+        status, payload = self._json("GET", "/api/workspaces/%s/digests?limit=0" % ws)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload["digests"]), 1)
+        status, payload = self._json("GET", "/api/workspaces/%s/digests?limit=999" % ws)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload["digests"]), 3)
+
+    def test_workspace_digests_limit_clamped_to_max(self):
+        ws = "wsDigestMax"
+        for index in range(MAX_DIGEST_HISTORY + 5):
+            self._record_digest(ws, "d%d" % index)
+        status, payload = self._json("GET", "/api/workspaces/%s/digests?limit=999" % ws)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload["digests"]), MAX_DIGEST_HISTORY)
+
+    def test_workspace_digests_non_integer_limit_returns_400(self):
+        status, payload = self._json(
+            "GET", "/api/workspaces/wsDigestBad/digests?limit=abc"
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("error", payload)
 
     def _high_severity_scan(self, name="PR scan"):
         body = {
