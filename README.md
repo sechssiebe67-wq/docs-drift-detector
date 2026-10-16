@@ -56,6 +56,8 @@ Open <http://localhost:8080>. The service exposes:
 - `GET  /api/trend/buckets` — cross-workspace time-bucketed drift roll-up (`bucket` optional `day`|`week`, default `week`; `limit` optional, default `10`, max `50`; `from`/`to` optional inclusive window; `cursor` optional page cursor).
 - `GET  /api/workspaces/{ws}/trend/buckets.csv` — time-bucketed drift trend as a CSV attachment (same query parameters as `/trend/buckets`).
 - `GET  /api/trend/buckets.csv` — cross-workspace time-bucketed drift roll-up as a CSV attachment (same query parameters as `/trend/buckets`).
+- `GET  /api/workspaces/{ws}/trend/buckets.jsonl` — time-bucketed drift trend as a newline-delimited JSON attachment (same query parameters as `/trend/buckets`).
+- `GET  /api/trend/buckets.jsonl` — cross-workspace time-bucketed drift roll-up as a newline-delimited JSON attachment (same query parameters as `/trend/buckets`).
 
 ### Scan request body
 
@@ -962,6 +964,54 @@ curl -sS 'localhost:8080/api/trend/buckets.csv?bucket=day' > trend.csv
   `docs_drift_detector/csv_export.py` (`to_csv(document, kind)`) and reuses the
   `buckets.build_workspace_buckets` / `buckets.build_rollup_buckets` output
   rather than recomputing anything.
+
+### JSONL export (trend endpoints)
+
+The same two **time-bucketed** endpoints can be downloaded as newline-delimited
+JSON (JSONL) instead of JSON or CSV, so a lead can stream the numbers into a data
+warehouse, a log pipeline or a notebook that reads line-delimited records — one
+self-contained JSON object per line:
+
+- `GET /api/workspaces/{ws}/trend/buckets.jsonl` — the per-workspace document,
+  one line per bucket.
+- `GET /api/trend/buckets.jsonl` — the cross-workspace roll-up, one line per
+  bucket per workspace (a bucket with no workspace breakdown still emits exactly
+  one line with an empty `workspace`).
+
+Both are read-only, use the exact same `bucket`, `limit`, `from`/`to` and
+`cursor` query parameters as their JSON and CSV siblings, and stream
+`Content-Type: application/x-ndjson; charset=utf-8` with a
+`Content-Disposition: attachment` filename
+(`docs-drift-<ws>-trend-buckets.jsonl` / `docs-drift-trend-buckets.jsonl`). Each
+line is serialised with `json.dumps(..., ensure_ascii=False, sort_keys=True)` and
+terminated by a newline, with a trailing newline after the last line.
+
+```sh
+curl -sS 'localhost:8080/api/workspaces/ws1/trend/buckets.jsonl?bucket=week&limit=5'
+# {"key": "2026-W02", "start": "2026-01-05T00:00:00+00:00", "end": "2026-01-11T23:59:59+00:00", "scans": 2, "total_findings": 3, "by_severity": {"high": 2, "medium": 1, "low": 0}, "open_findings": 3, "high_open": 2, "suppressed": 0}
+
+curl -sS 'localhost:8080/api/trend/buckets.jsonl?bucket=day' > trend.jsonl
+# one line per bucket per workspace, e.g.:
+# {"key": "2026-01-05", "start": "2026-01-05T00:00:00+00:00", "end": "2026-01-05T23:59:59+00:00", "scans": 1, "total_findings": 3, "by_severity": {"high": 2, "medium": 1, "low": 0}, "open_findings": 3, "high_open": 2, "suppressed": 0, "workspace": "ws1"}
+```
+
+- Every line is a JSON object that round-trips through `json.loads`, and its
+  aggregate fields (`scans`, `total_findings`, `by_severity`, `open_findings`,
+  `high_open`, `suppressed`) match the corresponding entry in the JSON response
+  for the same query parameters, so the JSONL and JSON never diverge.
+- Lines follow the JSON order exactly: buckets oldest-first, and within the
+  roll-up the per-bucket `workspaces` breakdown order (descending `high_open`
+  then workspace name). Only the requested page is emitted, so `cursor`
+  pagination and the `from`/`to` window select exactly the same lines the JSON
+  `buckets` payload carries.
+- A malformed `bucket` (for example `bucket=month`), non-integer `limit`
+  (`limit=abc`), malformed `from`/`to` (`from=not-a-date`) or malformed `cursor`
+  returns HTTP 400 with the same JSON error body as the JSON siblings. A
+  well-formed but unknown workspace returns HTTP 200 with an empty body.
+- The rendering lives in the dependency-free `docs_drift_detector/csv_export.py`
+  (`to_jsonl(document, kind)`, which raises `ValueError` for an unknown `kind`)
+  and reuses the `buckets.build_workspace_buckets` /
+  `buckets.build_rollup_buckets` output rather than recomputing anything.
 
 ### Pull-request suggestion
 
