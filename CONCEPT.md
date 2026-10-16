@@ -107,6 +107,17 @@ manual review marathon.
   logged to stderr and never blocks or changes the scan response. The config
   is stored in the same JSON file under `workspace_webhooks` and reloading
   tolerates a missing or malformed key.
+- **Pull-request suggestion document.** A stored scan can be turned into a
+  dependency-free, JSON-serialisable PR suggestion through
+  `GET /api/scans/{id}/pull-request` (with optional `base` and `prefix` query
+  parameters). The document carries a deterministic `branch`
+  (`docs-drift/<scan_id>` by default), `base_branch`, a `title`, a Markdown
+  `body`, a `files` list of `{path, action: "update", reason}` derived from the
+  distinct pages of the scan's high-severity findings (sorted by path), and a
+  `checklist` reusing `export.to_markdown`. The high-severity scope and ordering
+  come from `notify.build_payload`, so PR suggestions and webhooks stay
+  consistent. A scan with no high-severity findings still returns a document
+  with an empty `files` list and a body stating that no action is required.
 - **Operational endpoints.** `GET /healthz` plus a stateless JSON API.
 
 ## Differentiation
@@ -120,9 +131,11 @@ release-to-docs comparison with text and screenshot matching.
 
 - The outbound-notification item is half shipped: the configurable per-workspace
   webhook now notifies a Slack/Teams/CI endpoint about high-severity findings
-  once per stored scan. The remaining step is the **pull-request suggestion** for
-  the documentation repository (open a branch/PR with the exported checklist),
-  which should reuse the same payload and high-severity scope.
+  once per stored scan. The **pull-request suggestion** is now shipped as a
+  dependency-free document (`GET /api/scans/{id}/pull-request`) that a team or a
+  thin CI wrapper can turn into a branch and PR. What remains is the **GitHub
+  connector** that opens that branch/PR autonomously and pushes the exported
+  checklist, reusing the same high-severity scope.
 - Screenshot diffing with per-region highlighting instead of change signals.
 - Pluggable connectors for GitHub commit ranges and rendered docs sites.
 - Per-workspace repositories and doc-page quotas for the tiered SaaS plan.

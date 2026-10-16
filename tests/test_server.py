@@ -677,6 +677,100 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(scan["name"], "Hook down")
         self.assertEqual(scan["stats"]["findings"], 1)
 
+    def _high_severity_scan(self, name="PR scan"):
+        body = {
+            "name": name,
+            "changelog": 'renamed "Save" to "Save changes"\n"/settings" -> "/account/settings"',
+            "pages": [{"path": "help/a.md", "content": "Click Save. Go to /settings."}],
+            "metrics": {"help/a.md": {"views": 100000, "tickets": 5}},
+        }
+        status, scan = self._json("POST", "/api/scans", body)
+        self.assertEqual(status, 201)
+        self.assertEqual(scan["stats"]["high"], 2)
+        return scan
+
+    def test_scan_pull_request_endpoint(self):
+        scan = self._high_severity_scan()
+        self.addCleanup(self._json, "DELETE", "/api/scans/%s" % scan["id"])
+        status, raw, ctype = self._request(
+            "GET", "/api/scans/%s/pull-request" % scan["id"]
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", ctype)
+        document = json.loads(raw.decode("utf-8"))
+        self.assertEqual(
+            set(document),
+            {
+                "scan_id",
+                "name",
+                "workspace",
+                "created_at",
+                "branch",
+                "base_branch",
+                "title",
+                "body",
+                "files",
+                "checklist",
+            },
+        )
+        self.assertEqual(document["scan_id"], scan["id"])
+        self.assertEqual(document["branch"], "docs-drift/%s" % scan["id"])
+        self.assertEqual(document["base_branch"], "main")
+        self.assertEqual(document["title"], "docs: address drift from %s" % scan["name"])
+        self.assertEqual([f["path"] for f in document["files"]], ["help/a.md"])
+        self.assertEqual(
+            set(document["files"][0]), {"path", "action", "reason"}
+        )
+        self.assertEqual(document["files"][0]["action"], "update")
+        self.assertIn("Save", document["body"])
+        self.assertTrue(document["checklist"])
+
+    def test_scan_pull_request_query_options(self):
+        scan = self._high_severity_scan()
+        self.addCleanup(self._json, "DELETE", "/api/scans/%s" % scan["id"])
+        status, document = self._json(
+            "GET",
+            "/api/scans/%s/pull-request?base=develop&prefix=release" % scan["id"],
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(document["base_branch"], "develop")
+        self.assertEqual(document["branch"], "release/%s" % scan["id"])
+
+    def test_scan_pull_request_no_high_findings(self):
+        body = {
+            "name": "Quiet release",
+            "changelog": 'renamed "Save" to "Save changes"',
+            "pages": [{"path": "help/a.md", "content": "Click Save."}],
+        }
+        status, scan = self._json("POST", "/api/scans", body)
+        self.assertEqual(status, 201)
+        self.addCleanup(self._json, "DELETE", "/api/scans/%s" % scan["id"])
+        status, document = self._json("GET", "/api/scans/%s/pull-request" % scan["id"])
+        self.assertEqual(status, 200)
+        self.assertEqual(document["files"], [])
+        self.assertIn("no action is required", document["body"].lower())
+
+    def test_scan_pull_request_unknown_returns_404(self):
+        status, payload = self._json("GET", "/api/scans/doesnotexist123/pull-request")
+        self.assertEqual(status, 404)
+        self.assertIn("error", payload)
+
+    def test_scan_pull_request_invalid_id_returns_400(self):
+        status, _ = self._json("GET", "/api/scans/bad%20id!/pull-request")
+        self.assertEqual(status, 400)
+        status, _ = self._json("GET", "/api/scans/bad/id/pull-request")
+        self.assertEqual(status, 400)
+
+    def test_scan_pull_request_invalid_options_returns_400(self):
+        scan = self._high_severity_scan()
+        self.addCleanup(self._json, "DELETE", "/api/scans/%s" % scan["id"])
+        for query in ("base=", "prefix=", "base=bad%20base", "prefix=bad%20prefix", "base=a^b"):
+            status, payload = self._json(
+                "GET", "/api/scans/%s/pull-request?%s" % (scan["id"], query)
+            )
+            self.assertEqual(status, 400, query)
+            self.assertIn("error", payload)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,10 +6,11 @@ import json
 import os
 import re
 import sys
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import analyze, export, notify
+from . import analyze, export, notify, pullrequest
 from .store import Store
 
 MAX_BODY = 8 * 1024 * 1024
@@ -40,6 +41,10 @@ def _split(path: str) -> List[str]:
 
 def _valid_id(value: str) -> bool:
     return bool(re.match(r"^[A-Za-z0-9_-]{1,64}$", value or ""))
+
+
+def _valid_branch(value: str) -> bool:
+    return bool(re.match(r"^[A-Za-z0-9._/-]{1,200}$", value or ""))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -81,6 +86,21 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, UnicodeDecodeError):
             return None
         return data if isinstance(data, dict) else None
+
+    def _branch_options(self) -> Tuple[Optional[str], Optional[str]]:
+        """Parse and validate the optional ``base``/``prefix`` query values.
+
+        Returns ``(None, None)`` when either value fails the same
+        ``[A-Za-z0-9._/-]`` guard used for other path segments.
+        """
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlparse(self.path).query, keep_blank_values=True
+        )
+        base_branch = query.get("base", [pullrequest.DEFAULT_BASE_BRANCH])[0]
+        branch_prefix = query.get("prefix", [pullrequest.DEFAULT_BRANCH_PREFIX])[0]
+        if not _valid_branch(base_branch) or not _valid_branch(branch_prefix):
+            return None, None
+        return base_branch, branch_prefix
 
     # -- static files -----------------------------------------------------
     def _serve_static(self, relative: str) -> None:
@@ -183,6 +203,19 @@ class Handler(BaseHTTPRequestHandler):
                     "rules": rules,
                 },
             )
+        if len(parts) == 4 and parts[:2] == ["api", "scans"] and parts[3] == "pull-request":
+            if not _valid_id(parts[2]):
+                return self._error(400, "invalid scan id")
+            scan = self.server.store.get_scan(parts[2])
+            if scan is None:
+                return self._error(404, "scan not found")
+            base_branch, branch_prefix = self._branch_options()
+            if base_branch is None or branch_prefix is None:
+                return self._error(400, "invalid base or prefix")
+            document = pullrequest.build_suggestion(
+                scan, base_branch=base_branch, branch_prefix=branch_prefix
+            )
+            return self._json(200, document)
         if len(parts) == 3 and parts[:2] == ["api", "scans"] and _valid_id(parts[2]):
             scan = self.server.store.get_scan(parts[2])
             if scan is None:
@@ -206,6 +239,8 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if len(parts) > 4 and parts[:2] == ["api", "scans"] and parts[-1] == "suppressed":
+            return self._error(400, "invalid scan id")
+        if len(parts) > 4 and parts[:2] == ["api", "scans"] and parts[-1] == "pull-request":
             return self._error(400, "invalid scan id")
         return self._error(404, "not found")
 

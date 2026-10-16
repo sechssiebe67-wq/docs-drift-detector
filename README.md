@@ -24,6 +24,7 @@ Open <http://localhost:8080>. The service exposes:
 - `POST /api/analyze` — stateless analysis, returns findings without storing.
 - `GET  /api/scans/{id}` — scan detail with findings.
 - `GET  /api/scans/{id}/suppressed` — per-rule suppressed-finding drill-down.
+- `GET  /api/scans/{id}/pull-request` — PR suggestion document (`base`, `prefix` optional).
 - `GET  /api/scans/{id}/export.md` — Markdown checklist export.
 - `POST /api/scans/{id}/findings/{fid}/resolve` — set `{"resolved": true|false}`.
 - `DELETE /api/scans/{id}` — delete a scan.
@@ -272,6 +273,58 @@ list. Delivery is best-effort: a single plain `urllib.request` POST with
 or failing endpoint is logged to stderr and never blocks or changes the scan
 response, so `POST /api/scans` still returns HTTP 201 with the unchanged scan
 document.
+
+### Pull-request suggestion
+
+A stored scan can be turned into a PR suggestion document that a team (or a thin
+CI wrapper) can use to open a branch and pull request in the documentation
+repository. It reuses the exact high-severity scope of outbound webhooks, so a
+notification and a PR suggestion always describe the same findings.
+
+```sh
+curl -sS 'localhost:8080/api/scans/<scan-id>/pull-request?base=main&prefix=docs-drift' \
+  | python3 -m json.tool
+```
+
+`GET /api/scans/{id}/pull-request` returns HTTP 200 with
+`Content-Type: application/json` and this document shape (see
+`examples/sample_pull_request.json`):
+
+```json
+{
+  "scan_id": "a1b2c3d4e5f6",
+  "name": "Release 4.2 preview",
+  "workspace": "ws1",
+  "created_at": "2026-01-01T12:00:00+00:00",
+  "branch": "docs-drift/a1b2c3d4e5f6",
+  "base_branch": "main",
+  "title": "docs: address drift from Release 4.2 preview",
+  "body": "## Docs drift update: ...",
+  "files": [
+    {"path": "help/getting-started.md", "action": "update", "reason": "Route \"/settings\" changed in the release"}
+  ],
+  "checklist": "- [ ] **[HIGH] Route \"/settings\" changed in the release** ..."
+}
+```
+
+- `branch` is deterministic: `<prefix>/<scan_id>`, defaulting to
+  `docs-drift/<scan_id>`.
+- `base_branch` defaults to `main`.
+- `title` is `docs: address drift from <scan name>`.
+- `body` is Markdown with a summary line and the high-severity findings sorted by
+  descending score, each shown as page and old → new value.
+- `files` is the deduplicated, path-sorted list of `{path, action: "update",
+  reason}` for the distinct pages of the scan's high-severity findings.
+- `checklist` reuses `export.to_markdown` (the same Markdown produced by
+  `GET /api/scans/{id}/export.md`).
+
+The high-severity finding selection and ordering come from
+`notify.build_payload`, the same function the per-workspace webhook uses, so the
+scope is identical. Optional `base` and `prefix` query parameters are validated
+against `[A-Za-z0-9._/-]`; anything else returns HTTP 400. An unknown scan id
+returns HTTP 404 and an invalid scan id returns HTTP 400, matching the other scan
+routes. A scan with no high-severity findings still returns HTTP 200 with an
+empty `files` list and a body stating that no action is required.
 
 ### Example
 

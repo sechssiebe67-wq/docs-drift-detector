@@ -106,7 +106,9 @@
     <div class="row">
       <span id="summary" class="muted"></span>
       <a id="export" href="#" hidden>Export Markdown</a>
+      <button id="suggestion" type="button" aria-controls="suggestion-box" hidden>PR suggestion</button>
     </div>
+    <div id="suggestion-box" hidden></div>
     <div id="suppressed"></div>
     <div id="findings"></div>
   </section>
@@ -292,6 +294,41 @@ function renderSuppressed(stats, scanId) {
   if (scanId) box.appendChild(detailsBox);
 }
 
+async function showSuggestion() {
+  if (!activeScan || !activeScan.id) return;
+  $("status").textContent = "Loading PR suggestion…";
+  try {
+    const doc = await api("GET", "/api/scans/" + activeScan.id + "/pull-request");
+    const box = $("suggestion-box");
+    box.textContent = "";
+    box.hidden = false;
+    const heading = document.createElement("h3");
+    heading.textContent = doc.title || "PR suggestion";
+    box.appendChild(heading);
+    const branch = document.createElement("p");
+    branch.className = "muted";
+    branch.textContent = "Suggested branch " + (doc.branch || "") +
+      " against " + (doc.base_branch || "");
+    box.appendChild(branch);
+    const files = doc.files || [];
+    const label = document.createElement("p");
+    label.className = "muted";
+    label.textContent = files.length ? "Files to update (" + files.length + "):" : "No files to update.";
+    box.appendChild(label);
+    if (files.length) {
+      const list = document.createElement("ul");
+      for (const f of files) {
+        const item = document.createElement("li");
+        item.textContent = f.path + " (" + (f.action || "update") + ")" +
+          (f.reason ? " — " + f.reason : "");
+        list.appendChild(item);
+      }
+      box.appendChild(list);
+    }
+    $("status").textContent = "Suggested branch " + (doc.branch || "") + " for scan " + activeScan.id + ".";
+  } catch (e) { $("status").textContent = e.message; }
+}
+
 function renderFindings(scan) {
   activeScan = scan;
   const box = $("findings"); box.textContent = "";
@@ -302,11 +339,18 @@ function renderFindings(scan) {
   if (stats.suppressed > 0) { summary += " · " + stats.suppressed + " suppressed"; }
   $("summary").textContent = summary;
   renderSuppressed(stats, scan.id);
+  $("suggestion-box").hidden = true;
+  $("suggestion-box").textContent = "";
   if (scan.id) {
     $("export").hidden = false;
     $("export").href = "/api/scans/" + scan.id + "/export.md";
+    $("suggestion").hidden = false;
+    $("suggestion").setAttribute(
+      "aria-label", "Show pull-request suggestion for scan " + scan.id
+    );
   } else {
     $("export").hidden = true;
+    $("suggestion").hidden = true;
   }
   const findings = scan.findings || [];
   if (!findings.length) {
@@ -540,6 +584,7 @@ $("ws-import-file").addEventListener("change", () => {
 });
 $("analyze").addEventListener("click", () => run(false));
 $("save").addEventListener("click", () => run(true));
+$("suggestion").addEventListener("click", showSuggestion);
 loadScans();
 </script>
 </body>
