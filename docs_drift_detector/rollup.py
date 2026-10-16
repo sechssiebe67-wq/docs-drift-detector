@@ -16,9 +16,10 @@ per-workspace trend always agree on the same scan.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import timewindow
 from .trend import (
     DEFAULT_LIMIT,
     _clamp_limit,
@@ -31,16 +32,7 @@ _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 def _parse_created_at(value: Any) -> Optional[datetime]:
     """Return an aware UTC datetime for a stored ``created_at``, or None."""
-    if not isinstance(value, str) or not value.strip():
-        return None
-    text = value.strip()
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return timewindow.parse_stored(value)
 
 
 def _workspace_of(scan: Dict[str, Any]) -> str:
@@ -119,7 +111,12 @@ def _summary(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def build_rollup(scans: Any, limit: int = DEFAULT_LIMIT) -> Dict[str, Any]:
+def build_rollup(
+    scans: Any,
+    limit: int = DEFAULT_LIMIT,
+    from_time: Optional[datetime] = None,
+    to_time: Optional[datetime] = None,
+) -> Dict[str, Any]:
     """Build the cross-workspace drift roll-up document.
 
     ``scans`` is the list of stored scan dicts (as returned by the store's
@@ -127,6 +124,11 @@ def build_rollup(scans: Any, limit: int = DEFAULT_LIMIT) -> Dict[str, Any]:
     (default :data:`docs_drift_detector.trend.DEFAULT_LIMIT`). Malformed scans
     (non-dict, or missing/invalid ``id`` or ``created_at``) are skipped rather
     than raising.
+
+    ``from_time``/``to_time`` are optional aware datetimes forming an inclusive
+    ``created_at`` window; a scan outside it is excluded from ``scans``,
+    ``workspaces`` and ``summary`` alike. Either side may be ``None`` to leave
+    that end unbounded.
 
     The returned ``scans`` window holds up to ``limit`` of the most recent
     valid scans ordered oldest-first; each entry adds the scan's ``workspace``
@@ -148,6 +150,8 @@ def build_rollup(scans: Any, limit: int = DEFAULT_LIMIT) -> Dict[str, Any]:
             continue
         moment = _parse_created_at(scan.get("created_at"))
         if moment is None:
+            continue
+        if not timewindow.in_window(moment, from_time, to_time):
             continue
         entry = summarise_scan(scan)
         entry["workspace"] = _workspace_of(scan)

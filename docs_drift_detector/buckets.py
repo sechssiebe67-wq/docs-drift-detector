@@ -26,7 +26,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import rollup
+from . import rollup, timewindow
 from .trend import DEFAULT_LIMIT, _clamp_limit, summarise_scan
 
 BUCKETS = ("day", "week")
@@ -65,13 +65,18 @@ def _iso(moment: datetime) -> str:
 
 
 def _valid_entries(
-    scans: Any, with_workspace: bool = False
+    scans: Any,
+    with_workspace: bool = False,
+    from_time: Optional[datetime] = None,
+    to_time: Optional[datetime] = None,
 ) -> List[Tuple[datetime, int, Dict[str, Any]]]:
     """Normalise valid stored scans into ``(moment, index, entry)`` tuples.
 
     Scans that are not dicts, lack a well-formed ``id`` or have a
     missing/invalid ``created_at`` are skipped exactly like
-    :func:`docs_drift_detector.rollup.build_rollup`. The result is sorted
+    :func:`docs_drift_detector.rollup.build_rollup`. An optional inclusive
+    ``from_time``/``to_time`` ``created_at`` window drops scans outside it
+    (either side may be ``None`` to stay unbounded). The result is sorted
     oldest-first; scans created in the same second keep a deterministic order
     (newest input index first).
     """
@@ -86,6 +91,8 @@ def _valid_entries(
             continue
         moment = rollup._parse_created_at(scan.get("created_at"))
         if moment is None:
+            continue
+        if not timewindow.in_window(moment, from_time, to_time):
             continue
         entry = summarise_scan(scan)
         if with_workspace:
@@ -165,18 +172,22 @@ def build_workspace_buckets(
     workspace: str,
     bucket: str = DEFAULT_BUCKET,
     limit: int = DEFAULT_LIMIT,
+    from_time: Optional[datetime] = None,
+    to_time: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     """Build the per-workspace time-bucketed trend document.
 
     ``scans`` is the workspace's stored scan list (newest-first from
-    :meth:`docs_drift_detector.store.Store.list_workspace_scans`). Malformed
-    scans are skipped and ``limit`` (clamped into ``1..50``) bounds the number
-    of buckets, keeping the most recent ones but presenting them
-    **oldest-first**. ``summary`` aggregates the window and sets ``delta_high``
-    to ``newest bucket high_open - oldest bucket high_open`` (``0`` when fewer
-    than two buckets are in the window).
+    :meth:`docs_drift_detector.store.Store.list_workspace_scans`). An optional
+    inclusive ``from_time``/``to_time`` ``created_at`` window excludes scans
+    outside it before bucketing (either side may be ``None``). Malformed scans
+    are skipped and ``limit`` (clamped into ``1..50``) bounds the number of
+    buckets, keeping the most recent ones but presenting them **oldest-first**.
+    ``summary`` aggregates the window and sets ``delta_high`` to ``newest bucket
+    high_open - oldest bucket high_open`` (``0`` when fewer than two buckets are
+    in the window).
     """
-    valid = _valid_entries(scans)
+    valid = _valid_entries(scans, from_time=from_time, to_time=to_time)
     window = _window(valid, bucket, limit)
     return {
         "workspace": workspace,
@@ -190,18 +201,24 @@ def build_rollup_buckets(
     scans: Any,
     bucket: str = DEFAULT_BUCKET,
     limit: int = DEFAULT_LIMIT,
+    from_time: Optional[datetime] = None,
+    to_time: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     """Build the cross-workspace time-bucketed drift roll-up.
 
     ``scans`` is the list of every stored scan dict (as returned by
-    :meth:`docs_drift_detector.store.Store.list_all_scans`). Each bucket adds a
-    ``workspaces`` breakdown sorted by descending ``high_open`` then workspace
+    :meth:`docs_drift_detector.store.Store.list_all_scans`). An optional
+    inclusive ``from_time``/``to_time`` ``created_at`` window excludes scans
+    outside it before bucketing (either side may be ``None``). Each bucket adds
+    a ``workspaces`` breakdown sorted by descending ``high_open`` then workspace
     name, the top-level ``workspaces`` list aggregates the whole window the same
     way, and ``summary`` aggregates the window plus the bucket-level
     ``delta_high`` and a distinct-workspace count. Malformed scans are skipped
     and ``limit`` (clamped into ``1..50``) bounds the number of buckets.
     """
-    valid = _valid_entries(scans, with_workspace=True)
+    valid = _valid_entries(
+        scans, with_workspace=True, from_time=from_time, to_time=to_time
+    )
     window = _window(valid, bucket, limit)
     documents = []
     for record in window:

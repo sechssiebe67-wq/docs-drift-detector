@@ -14,7 +14,10 @@ agree with webhooks, digests and PR suggestions.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from . import timewindow
 
 DEFAULT_LIMIT = 10
 MAX_LIMIT = 50
@@ -116,21 +119,41 @@ def _summary(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def build_trend(store: Any, workspace: str, limit: int = DEFAULT_LIMIT) -> Dict[str, Any]:
+def build_trend(
+    store: Any,
+    workspace: str,
+    limit: int = DEFAULT_LIMIT,
+    from_time: Optional[datetime] = None,
+    to_time: Optional[datetime] = None,
+) -> Dict[str, Any]:
     """Build the per-workspace drift trend document.
 
-    The store's stored scans are selected newest-first, bounded to ``limit``
-    (clamped into ``1..MAX_LIMIT``) and presented oldest-first as a
-    chronological series. The ``summary`` block aggregates the window and sets
-    ``delta_high`` to ``newest.high_open - oldest.high_open`` (``0`` when fewer
-    than two scans are in the window). Malformed scans and missing fields are
-    skipped or defaulted to ``0`` so the function never raises.
+    The store's stored scans are selected newest-first, filtered to the optional
+    inclusive ``from_time``/``to_time`` ``created_at`` window (either side may
+    be ``None``), bounded to ``limit`` (clamped into ``1..MAX_LIMIT``) and
+    presented oldest-first as a chronological series. The ``summary`` block
+    aggregates the window and sets ``delta_high`` to
+    ``newest.high_open - oldest.high_open`` (``0`` when fewer than two scans are
+    in the window). Malformed scans and missing fields are skipped or defaulted
+    to ``0`` so the function never raises; when a window is supplied a scan
+    whose ``created_at`` cannot be parsed is excluded.
     """
     bounded = _clamp_limit(limit)
     scans = store.list_workspace_scans(workspace)
     if not isinstance(scans, list):
         scans = []
-    recent = [scan for scan in scans if isinstance(scan, dict)][:bounded]
+    windowed = bool(from_time is not None or to_time is not None)
+    recent: List[Dict[str, Any]] = []
+    for scan in scans:
+        if not isinstance(scan, dict):
+            continue
+        if windowed:
+            moment = timewindow.parse_stored(scan.get("created_at"))
+            if moment is None or not timewindow.in_window(moment, from_time, to_time):
+                continue
+        recent.append(scan)
+        if len(recent) >= bounded:
+            break
     entries = [summarise_scan(scan) for scan in reversed(recent)]
     return {
         "workspace": workspace,

@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import analyze, buckets, export, github, pullrequest, rollup, runner, trend
+from . import analyze, buckets, export, github, pullrequest, rollup, runner, timewindow, trend
 from .store import (
     DEFAULT_GITHUB_TOKEN_ENV,
     MAX_DIGEST_HISTORY,
@@ -145,6 +145,26 @@ class Handler(BaseHTTPRequestHandler):
                 return None, None
         return bucket, limit
 
+    def _window_options(
+        self,
+    ) -> Optional[Tuple[Optional[datetime], Optional[datetime]]]:
+        """Parse the optional ``from``/``to`` query values.
+
+        Returns ``(start, end)`` where either side may be ``None`` (unbounded),
+        or ``None`` when a present value is malformed so the caller can answer
+        HTTP 400. A plain date is midnight UTC, a full ISO-8601 timestamp keeps
+        its offset, and the window is inclusive ``[start, end]``.
+        """
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlparse(self.path).query, keep_blank_values=True
+        )
+        try:
+            return timewindow.parse_window(
+                query.get("from", [None])[0], query.get("to", [None])[0]
+            )
+        except timewindow.WindowError:
+            return None
+
     # -- static files -----------------------------------------------------
     def _serve_static(self, relative: str) -> None:
         safe = os.path.normpath("/" + relative).lstrip("/")
@@ -218,7 +238,16 @@ class Handler(BaseHTTPRequestHandler):
                     limit = int(query["limit"][0])
                 except (TypeError, ValueError):
                     return self._error(400, "invalid limit")
-            return self._json(200, trend.build_trend(self.server.store, parts[2], limit))
+            window = self._window_options()
+            if window is None:
+                return self._error(400, "invalid from or to")
+            start, end = window
+            return self._json(
+                200,
+                trend.build_trend(
+                    self.server.store, parts[2], limit, from_time=start, to_time=end
+                ),
+            )
         if (
             len(parts) == 5
             and parts[:2] == ["api", "workspaces"]
@@ -230,11 +259,20 @@ class Handler(BaseHTTPRequestHandler):
             bucket, limit = self._bucket_options()
             if bucket is None or limit is None:
                 return self._error(400, "invalid bucket or limit")
+            window = self._window_options()
+            if window is None:
+                return self._error(400, "invalid from or to")
+            start, end = window
             scans = self.server.store.list_workspace_scans(parts[2])
             return self._json(
                 200,
                 buckets.build_workspace_buckets(
-                    scans, parts[2], bucket=bucket, limit=limit
+                    scans,
+                    parts[2],
+                    bucket=bucket,
+                    limit=limit,
+                    from_time=start,
+                    to_time=end,
                 ),
             )
         if parts == ["api", "schedule", "status"]:
@@ -278,9 +316,20 @@ class Handler(BaseHTTPRequestHandler):
             bucket, limit = self._bucket_options()
             if bucket is None or limit is None:
                 return self._error(400, "invalid bucket or limit")
+            window = self._window_options()
+            if window is None:
+                return self._error(400, "invalid from or to")
+            start, end = window
             scans = self.server.store.list_all_scans()
             return self._json(
-                200, buckets.build_rollup_buckets(scans, bucket=bucket, limit=limit)
+                200,
+                buckets.build_rollup_buckets(
+                    scans,
+                    bucket=bucket,
+                    limit=limit,
+                    from_time=start,
+                    to_time=end,
+                ),
             )
         if parts == ["api", "trend"]:
             query = urllib.parse.parse_qs(
@@ -292,8 +341,15 @@ class Handler(BaseHTTPRequestHandler):
                     limit = int(query["limit"][0])
                 except (TypeError, ValueError):
                     return self._error(400, "invalid limit")
+            window = self._window_options()
+            if window is None:
+                return self._error(400, "invalid from or to")
+            start, end = window
             scans = self.server.store.list_all_scans()
-            return self._json(200, rollup.build_rollup(scans, limit))
+            return self._json(
+                200,
+                rollup.build_rollup(scans, limit, from_time=start, to_time=end),
+            )
         if parts == ["api", "scans"]:
             return self._json(200, {"scans": self.server.store.list_scans()})
         if len(parts) == 4 and parts[:2] == ["api", "scans"] and parts[3] == "suppressed":
